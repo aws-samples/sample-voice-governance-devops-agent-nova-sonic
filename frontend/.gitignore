@@ -1,0 +1,6 @@
+# Runtime configuration is generated at deploy time from Terraform outputs
+# and must never be committed (Req 14.2, 14.3). config.example.json documents
+# the shape.
+public/config.json
+
+node_modules/

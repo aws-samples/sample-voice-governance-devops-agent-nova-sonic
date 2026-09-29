@@ -1,0 +1,109 @@
+# ci/frontend/deploy.yml — Frontend_Pipeline Deploy stage (Req 14.3, 16.9,
+# 16.10).
+#
+# Deploys the static bundle the BuildAndPlan stage produced:
+#
+#   1. generate config.json FROM TERRAFORM OUTPUTS (Req 14.3)
+#   2. `aws s3 sync` the bundle to the frontend bucket — inside CodeBuild,
+#      never a CodePipeline S3 deploy action (Req 16.9, 16.10)
+#   3. CloudFront cache invalidation AFTER the sync completes (Req 16.9)
+#
+# OUTPUTS-EXPORT CONTRACT (the config.json source): the IaC pipeline's
+# deploy stage ends every successful `terraform apply` of the app layer by
+# exporting its outputs —
+#
+#     terraform output -json > app-outputs.json
+#     aws s3 cp app-outputs.json s3://$TF_STATE_BUCKET/app-outputs/latest.json
+#
+# (see ci/iac/deploy.yml). This stage reads that object and jq-transforms
+# it into the exact shape of frontend/config.example.json, which is also
+# the required-key manifest frontend/src/main.js validates at runtime.
+# TF_STATE_BUCKET is wired onto this pipeline's Deploy stage by
+# infrastructure/bootstrap/main.tf (deploy_environment_variables on
+# module "pipeline_frontend").
+#
+# TWO-PHASE FLOW (fail fast, Req 16.9): FRONTEND_BUCKET and
+# CLOUDFRONT_DISTRIBUTION_ID are empty strings until the app layer has
+# been applied once and the operator re-applies bootstrap with the real
+# values (see infrastructure/bootstrap/variables.tf). While either is
+# empty — or while no exported outputs object exists yet — this stage
+# fails with an explanatory message instead of half-deploying.
+#
+# Required CodeBuild environment variables (bootstrap pipeline module):
+#   FRONTEND_BUCKET            — frontend hosting bucket (app-layer output)
+#   CLOUDFRONT_DISTRIBUTION_ID — distribution to invalidate (app-layer output)
+#   TF_STATE_BUCKET            — bootstrap state bucket carrying the
+#                                exported app-outputs/latest.json
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        # Two-phase guard: both values are "" on the first bootstrap apply
+        # because the app layer had not created these resources yet.
+        if [ -z "${FRONTEND_BUCKET:-}" ] || [ -z "${CLOUDFRONT_DISTRIBUTION_ID:-}" ]; then
+          echo "ERROR: FRONTEND_BUCKET and/or CLOUDFRONT_DISTRIBUTION_ID is empty." >&2
+          echo "Two-phase flow: apply the app layer once (IaC pipeline), then re-apply" >&2
+          echo "infrastructure/bootstrap with frontend_bucket_name and" >&2
+          echo "cloudfront_distribution_id set to the app layer's outputs." >&2
+          exit 1
+        fi
+        if [ -z "${TF_STATE_BUCKET:-}" ]; then
+          echo "ERROR: TF_STATE_BUCKET is not set on this CodeBuild project." >&2
+          echo "It is wired by infrastructure/bootstrap/main.tf (deploy_environment_variables" >&2
+          echo "on module \"pipeline_frontend\") — re-apply the bootstrap layer." >&2
+          exit 1
+        fi
+      # Fetch the app layer's exported Terraform outputs (contract above).
+      - |
+        set -euo pipefail
+        if ! aws s3 cp "s3://${TF_STATE_BUCKET}/app-outputs/latest.json" /tmp/app-outputs.json; then
+          echo "ERROR: could not fetch s3://${TF_STATE_BUCKET}/app-outputs/latest.json." >&2
+          echo "The IaC pipeline's deploy stage exports it after every successful" >&2
+          echo "'terraform apply' (ci/iac/deploy.yml) — run the IaC pipeline first." >&2
+          exit 1
+        fi
+
+  build:
+    commands:
+      # config.json from Terraform outputs (Req 14.3): `terraform output
+      # -json` wraps every output as {value, type, sensitive}; req() fails
+      # the build naming any output that is missing so a drifted contract
+      # can never ship a half-filled config. Shape mirrors
+      # frontend/config.example.json exactly.
+      - |
+        set -euo pipefail
+        jq '
+          def req($k):
+            if (.[$k] | . != null and has("value")) then .[$k].value
+            else error("missing terraform output: " + $k) end;
+          {
+            cognito: {
+              userPoolId: req("cognito_user_pool_id"),
+              clientId: req("cognito_client_id"),
+              domain: req("cognito_hosted_ui_url")
+            },
+            voiceWsUrl: req("voice_ws_url"),
+            events: {
+              httpEndpoint: req("appsync_events_http_endpoint"),
+              realtimeEndpoint: req("appsync_events_realtime_endpoint")
+            },
+            vapidPublicKey: req("vapid_public_key"),
+            region: req("aws_region")
+          }
+        ' /tmp/app-outputs.json > "$CODEBUILD_SRC_DIR_BuildOutput/config.json"
+      - jq . "$CODEBUILD_SRC_DIR_BuildOutput/config.json" > /dev/null
+      # Deploy: sync the reviewed bundle (BuildOutput) plus the freshly
+      # generated config.json in one pass. --delete drops assets removed
+      # from the bundle so stale modules never linger (Req 16.9: sync runs
+      # in CodeBuild, never an S3 deploy action).
+      - aws s3 sync "$CODEBUILD_SRC_DIR_BuildOutput/" "s3://${FRONTEND_BUCKET}/" --delete
+      # Invalidation only AFTER the sync completed successfully (Req 16.9);
+      # /* covers every updated asset including config.json.
+      - aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths "/*"
+      - echo "Frontend deployed to s3://${FRONTEND_BUCKET} and invalidation issued for distribution ${CLOUDFRONT_DISTRIBUTION_ID}"

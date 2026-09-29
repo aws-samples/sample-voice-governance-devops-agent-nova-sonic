@@ -1,0 +1,66 @@
+# ci/iac/deploy.yml — IaC_Pipeline Deploy stage (Req 15.6, 16.7, 16.10).
+#
+# Applies the EXACT plan file the BuildAndPlan stage produced and the
+# manual approval reviewed (Req 16.6, 16.7) — never a fresh plan — then
+# exports the app layer's outputs for the frontend pipeline.
+#
+# Plan-fidelity mechanics: `terraform apply tfplan` refuses to run if the
+# configuration or state changed since the plan was created, so what was
+# approved is what is applied. The Notifier zip travels alongside the plan
+# in the BuildOutput artifact and is restored to the SAME cwd-relative
+# path (notifier-dist/notifier.zip) recorded in the plan's
+# lambda_zip_path, byte-identical, so the Lambda upload matches the
+# planned source hash. Provider plugins are re-resolved by `terraform
+# init` here; committing a .terraform.lock.hcl in infrastructure/app would
+# additionally pin provider builds across the two stages.
+#
+# OUTPUTS-EXPORT CONTRACT (consumed by ci/frontend/deploy.yml): after a
+# successful apply, `terraform output -json` is uploaded to
+#
+#     s3://$TF_STATE_BUCKET/app-outputs/latest.json
+#
+# The frontend deploy stage reads that object to generate config.json from
+# Terraform outputs (Req 14.3, 16.9). None of the app layer's outputs is
+# sensitive (the VAPID key exported is the PUBLIC one).
+#
+# Required CodeBuild environment variables (bootstrap pipeline module):
+#   TF_STATE_BUCKET — app-layer state bucket (bootstrap state_backend)
+#   TF_LOCK_TABLE   — DynamoDB lock table    (bootstrap state_backend)
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    TERRAFORM_VERSION: "1.9.8"
+
+phases:
+  install:
+    commands:
+      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - unzip -o -q /tmp/terraform.zip -d /usr/local/bin
+      - terraform -version
+
+  pre_build:
+    commands:
+      - ': "${TF_STATE_BUCKET:?TF_STATE_BUCKET must be set on the CodeBuild project (wired by infrastructure/bootstrap)}"'
+      - ': "${TF_LOCK_TABLE:?TF_LOCK_TABLE must be set on the CodeBuild project (wired by infrastructure/bootstrap)}"'
+      # Restore the reviewed plan and the zip it hashed to the exact
+      # relative locations the plan was created with.
+      - cd "$CODEBUILD_SRC_DIR/infrastructure/app"
+      - cp "$CODEBUILD_SRC_DIR_BuildOutput/tfplan" tfplan
+      - mkdir -p notifier-dist
+      - cp "$CODEBUILD_SRC_DIR_BuildOutput/notifier-dist/notifier.zip" notifier-dist/notifier.zip
+      # Same remote backend configuration as the plan (Req 15.6).
+      - terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}" -backend-config="key=app/terraform.tfstate" -backend-config="region=${AWS_REGION}" -backend-config="dynamodb_table=${TF_LOCK_TABLE}"
+
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/infrastructure/app"
+      # The reviewed plan, nothing else. -input=false: a plan file never
+      # prompts; failure here fails the stage and the execution (Req 16.5).
+      - terraform apply -input=false tfplan
+      # Outputs export (contract in the header comment): the frontend
+      # pipeline's deploy stage generates config.json from this object.
+      - terraform output -json > /tmp/app-outputs.json
+      - aws s3 cp /tmp/app-outputs.json "s3://${TF_STATE_BUCKET}/app-outputs/latest.json"
+      - echo "App layer applied; outputs exported to s3://${TF_STATE_BUCKET}/app-outputs/latest.json"

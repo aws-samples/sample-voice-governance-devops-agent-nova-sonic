@@ -1,0 +1,97 @@
+# ci/backend/deploy.yml — Backend_Pipeline Deploy stage (Req 16.7, 16.10).
+#
+# Rolls the ECS voice service onto the image the BuildAndPlan stage pushed
+# (image-uri.txt in the BuildOutput artifact). Deployment runs entirely
+# inside CodeBuild — never a CodePipeline deploy action (Req 16.10).
+#
+# NOTE — Terraform owns the task definition. The app layer
+# (infrastructure/app, modules/ecs_service) creates and manages the task
+# definition; its container image comes from the `container_image`
+# Terraform variable. Because the ECR repository is IMMUTABLE-tagged, a
+# stable tag like "latest" cannot exist, so `update-service
+# --force-new-deployment` alone can never pick up a new image. This stage
+# therefore registers a NEW task-definition revision that is a field-exact
+# copy of the current one with only the image replaced, then points the
+# service at it:
+#
+#   describe-services -> describe-task-definition -> jq (swap image, strip
+#   read-only response fields) -> register-task-definition ->
+#   update-service --task-definition -> wait services-stable
+#
+# Contract with the IaC pipeline: after this deploy, the live revision is
+# ahead of the Terraform-declared one. The next `terraform apply` of the
+# app layer will roll the service back to whatever `container_image` its
+# tfvars carry — the operator keeps that tfvars value in step with the
+# image URIs this pipeline deploys (documented in ci/iac/build.yml).
+#
+# Required CodeBuild environment variables (bootstrap pipeline module):
+#   ECR_REPOSITORY_URL — used to locate the voice-service container inside
+#                        the task definition (image prefix match)
+#   ECS_CLUSTER        — cluster name (default <environment>-voice)
+#   ECS_SERVICE        — service name (default <environment>-voice-service)
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  pre_build:
+    commands:
+      - ': "${ECR_REPOSITORY_URL:?ECR_REPOSITORY_URL must be set on the CodeBuild project (wired by infrastructure/bootstrap)}"'
+      - ': "${ECS_CLUSTER:?ECS_CLUSTER must be set on the CodeBuild project (wired by infrastructure/bootstrap)}"'
+      - ': "${ECS_SERVICE:?ECS_SERVICE must be set on the CodeBuild project (wired by infrastructure/bootstrap)}"'
+      # The image URI produced by BuildAndPlan and reviewed at the manual
+      # approval gate (Req 16.6, 16.7). CODEBUILD_SRC_DIR_BuildOutput is
+      # the secondary input artifact's root.
+      - |
+        set -euo pipefail
+        IMAGE_URI="$(cat "$CODEBUILD_SRC_DIR_BuildOutput/image-uri.txt")"
+        test -n "$IMAGE_URI"
+        printf '%s' "$IMAGE_URI" > /tmp/image-uri.txt
+        echo "Deploying image $IMAGE_URI to $ECS_CLUSTER/$ECS_SERVICE"
+
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        IMAGE_URI="$(cat /tmp/image-uri.txt)"
+
+        # Current revision as the service actually runs it.
+        current_td_arn="$(aws ecs describe-services \
+          --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+          --query 'services[0].taskDefinition' --output text)"
+        echo "Current task definition: $current_td_arn"
+        aws ecs describe-task-definition \
+          --task-definition "$current_td_arn" \
+          --query 'taskDefinition' > /tmp/current-taskdef.json
+
+        # New revision = current revision with only the image swapped on
+        # every container that pulls from this pipeline's ECR repository
+        # (exactly one in the design), minus the read-only fields that
+        # describe-task-definition returns but register-task-definition
+        # rejects. Fail loudly if no container matches — that would mean
+        # the deploy is pointed at the wrong service.
+        jq --arg image "$IMAGE_URI" --arg repo "$ECR_REPOSITORY_URL" '
+          if ([.containerDefinitions[] | select(.image | startswith($repo))] | length) == 0
+          then error("no container in the task definition pulls from " + $repo)
+          else . end
+          | .containerDefinitions |= map(
+              if (.image | startswith($repo)) then .image = $image else . end
+            )
+          | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
+        ' /tmp/current-taskdef.json > /tmp/new-taskdef.json
+
+        new_td_arn="$(aws ecs register-task-definition \
+          --cli-input-json file:///tmp/new-taskdef.json \
+          --query 'taskDefinition.taskDefinitionArn' --output text)"
+        echo "Registered new task definition: $new_td_arn"
+
+        aws ecs update-service \
+          --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+          --task-definition "$new_td_arn" > /dev/null
+      # Rolling deployment with min 2 tasks, ALB health checks, and a 120 s
+      # stopTimeout can exceed one `wait services-stable` window (40 polls
+      # x 15 s = 10 minutes), so allow a second window before failing.
+      - aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" || aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+      - echo "Service $ECS_SERVICE is stable on $(cat /tmp/image-uri.txt)"

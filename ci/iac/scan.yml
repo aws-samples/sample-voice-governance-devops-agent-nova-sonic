@@ -1,0 +1,95 @@
+# ci/iac/scan.yml — IaC_Pipeline SecurityScan stage (Req 14.2, 16.3, 16.4).
+#
+# Three gates, each failing the build on findings:
+#
+#   1. gitleaks   — secret scan over the whole archive (Req 14.2, 16.4)
+#   2. checkov    — Terraform misconfiguration scan over infrastructure/;
+#                   high or critical findings fail the stage (Req 16.4)
+#   3. grep gate  — the hardcoded-value deny-list of Req 14.2: 12-digit
+#                   account-id-like values anywhere in source, and a
+#                   hardcoded us-east-1 in Terraform outside variable
+#                   declarations and comments
+#
+# checkov severity note: severities come from checkov's check metadata and
+# --hard-fail-on makes HIGH/CRITICAL findings non-negotiable, while the
+# default exit behavior (non-zero on any failed check) is left in place —
+# the gate is therefore AT LEAST as strict as Req 16.4 requires. Operators
+# may add --soft-fail-on for triaged lower-severity checks later; the
+# floor stays "high or critical always fails".
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    CHECKOV_SPEC: "checkov~=3.2"
+    GITLEAKS_VERSION: "8.21.2"
+
+phases:
+  install:
+    runtime-versions:
+      python: "3.11"
+    commands:
+      - curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+      - tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+      - gitleaks version
+      # checkov is a plain Python CLI; the image's 3.11 runtime carries it
+      # fine (it scans HCL — it never imports the 3.14 application code).
+      - pip install --quiet "$CHECKOV_SPEC"
+
+  pre_build:
+    commands:
+      # Secret scan FIRST, before any tool writes into the source tree.
+      # --no-git: the CodePipeline source artifact carries no .git dir.
+      # --redact: never print candidate secret values into build logs.
+      - gitleaks detect --no-git --redact --source "$CODEBUILD_SRC_DIR"
+
+  build:
+    commands:
+      # Terraform misconfiguration scan over both layers (Req 16.4).
+      - checkov --directory "$CODEBUILD_SRC_DIR/infrastructure" --quiet --hard-fail-on HIGH --hard-fail-on CRITICAL
+      # ----------------------------------------------------------------
+      # Hardcoded-value grep gate (Req 14.2). Two deny rules:
+      #
+      #   (a) 12-digit runs (AWS account ids) in any source file. The
+      #       regex matches exactly-12-digit runs, so 10/13-digit epoch
+      #       timestamps never trip it. package-lock.json is excluded
+      #       (base64 integrity hashes can embed digit runs), as are
+      #       tool caches (never in a clean archive; excluded anyway).
+      #       There are currently no allowed files; when one becomes
+      #       legitimately necessary, add a targeted --exclude for it
+      #       WITH a review comment here.
+      #
+      #   (b) a hardcoded us-east-1 in Terraform resource code. The
+      #       region is a variable (Req 15.5) — the literal may appear
+      #       only in variables.tf (defaults/descriptions) or in
+      #       comment lines.
+      # ----------------------------------------------------------------
+      - |
+        set -euo pipefail
+        cd "$CODEBUILD_SRC_DIR"
+        violations="$(grep -rInE '(^|[^0-9])[0-9]{12}([^0-9]|$)' \
+          --include='*.tf' --include='*.tfvars' --include='*.py' \
+          --include='*.js' --include='*.mjs' --include='*.json' \
+          --include='*.yml' --include='*.yaml' --include='*.sh' \
+          --include='*.html' \
+          --exclude='package-lock.json' \
+          --exclude-dir={node_modules,.venv,.terraform,.mypy_cache,.ruff_cache,.pytest_cache,.hypothesis,__pycache__,dist,envs} \
+          infrastructure backend frontend ci scripts 2>/dev/null || true)"
+        if [ -n "$violations" ]; then
+          printf '%s\n' "$violations"
+          echo "FAIL: 12-digit account-id-like values found in source (Req 14.2)." >&2
+          exit 1
+        fi
+        echo "PASS: no 12-digit account-id-like values in source."
+      - |
+        set -euo pipefail
+        cd "$CODEBUILD_SRC_DIR"
+        violations="$(grep -rn --include='*.tf' 'us-east-1' infrastructure \
+          | grep -v '/variables\.tf:' \
+          | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+        if [ -n "$violations" ]; then
+          printf '%s\n' "$violations"
+          echo "FAIL: hardcoded us-east-1 in Terraform outside variables.tf/comments (Req 14.2, 15.5)." >&2
+          exit 1
+        fi
+        echo "PASS: no hardcoded us-east-1 in Terraform resource code."

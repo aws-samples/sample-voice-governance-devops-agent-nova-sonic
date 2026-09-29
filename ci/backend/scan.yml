@@ -1,0 +1,74 @@
+# ci/backend/scan.yml — Backend_Pipeline SecurityScan stage (Req 16.3, 16.4).
+#
+# Runs inside the bootstrap layer's CodeBuild project (image
+# aws/codebuild/standard:7.0) against the SOURCE ARTIFACT (repo root =
+# $CODEBUILD_SRC_DIR). Three gates, each failing the build on findings:
+#
+#   1. gitleaks    — secret scan over the whole archive (Req 14.2, 16.4)
+#   2. bandit -ll  — Python SAST over backend/, medium severity and above
+#   3. pip-audit   — known-vulnerability audit of the resolved dependency
+#                    sets of BOTH backend packages (voice_service, notifier)
+#
+# pip-audit has no severity filter (OSV advisories are not uniformly
+# scored), so ANY known vulnerability fails the stage — at least as strict
+# as the high-or-critical bar of Req 16.4. bandit -ll fails on MEDIUM+.
+#
+# Python 3.14 is not pre-installed on standard:7.0, so the newest
+# pre-installed runtime (3.11) only bootstraps uv, and uv provisions the
+# CPython 3.14 the tools and dependency resolution actually run on —
+# matching the packages' requires-python = ">=3.14".
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    # Tool pins (compatible-release style, mirroring the repo's pyproject
+    # pins). Override per project via CodeBuild environment variables.
+    PYTHON_VERSION: "3.14"
+    UV_SPEC: "uv~=0.9"
+    BANDIT_SPEC: "bandit~=1.8"
+    PIP_AUDIT_SPEC: "pip-audit~=2.7"
+    GITLEAKS_VERSION: "8.21.2"
+
+phases:
+  install:
+    runtime-versions:
+      python: "3.11"
+    commands:
+      # Pinned gitleaks binary (Req 16.4): released tarball over TLS.
+      - curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+      - tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+      - gitleaks version
+      # uv bootstraps CPython 3.14 and every Python security tool below.
+      - pip install --quiet "$UV_SPEC"
+      - uv python install "$PYTHON_VERSION"
+      - uv venv --python "$PYTHON_VERSION" /tmp/sectools
+      - uv pip install --python /tmp/sectools/bin/python "$BANDIT_SPEC" "$PIP_AUDIT_SPEC"
+
+  pre_build:
+    commands:
+      # Secret scan FIRST, before anything writes into the source tree.
+      # --no-git: the CodePipeline source artifact carries no .git dir.
+      # --redact: never print candidate secret values into build logs
+      # (Req 14.6). Findings exit non-zero and fail the stage (Req 16.4).
+      - gitleaks detect --no-git --redact --source "$CODEBUILD_SRC_DIR"
+
+  build:
+    commands:
+      # Python SAST over all backend code (voice_service, notifier, shared).
+      # -ll fails on MEDIUM and HIGH findings; runs on the same CPython 3.14
+      # the code targets so 3.14 syntax parses.
+      - /tmp/sectools/bin/bandit -ll -r "$CODEBUILD_SRC_DIR/backend"
+      # Dependency audit, voice service: resolve the package's runtime
+      # dependency set for CPython 3.14 into a scratch venv, freeze the
+      # exact pins, and audit them (--no-deps: the freeze is fully pinned;
+      # the local first-party package itself is filtered out).
+      - uv venv --python "$PYTHON_VERSION" /tmp/audit-voice
+      - uv pip install --quiet --python /tmp/audit-voice/bin/python "$CODEBUILD_SRC_DIR/backend/voice_service"
+      - uv pip freeze --python /tmp/audit-voice/bin/python | grep -v '^voice-service' > /tmp/voice-requirements.txt
+      - /tmp/sectools/bin/pip-audit --progress-spinner off --no-deps -r /tmp/voice-requirements.txt
+      # Dependency audit, notifier: same procedure for the Lambda package.
+      - uv venv --python "$PYTHON_VERSION" /tmp/audit-notifier
+      - uv pip install --quiet --python /tmp/audit-notifier/bin/python "$CODEBUILD_SRC_DIR/backend/notifier"
+      - uv pip freeze --python /tmp/audit-notifier/bin/python | grep -v '^notifier' > /tmp/notifier-requirements.txt
+      - /tmp/sectools/bin/pip-audit --progress-spinner off --no-deps -r /tmp/notifier-requirements.txt

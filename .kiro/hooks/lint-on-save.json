@@ -1,0 +1,20 @@
+{
+  "enabled": true,
+  "name": "Lint on Save",
+  "description": "Runs the matching linter when a source file is saved: ruff + mypy for Python under backend/, eslint for JavaScript under frontend/, terraform fmt/validate for Terraform under infrastructure/.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "backend/**/*.py",
+      "frontend/src/**/*.js",
+      "frontend/public/**/*.js",
+      "frontend/tests/**/*.js",
+      "infrastructure/**/*.tf"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "A source file was just saved. Run the lint checks that match the saved file and report the results.\n\n- Python file under backend/: identify the package that contains it (backend/voice_service, backend/notifier, or backend/shared) and run `ruff check` and `mypy --strict` scoped to that package, using the nearest pyproject.toml for tool configuration (shared code is checked with backend/voice_service's configuration).\n- JavaScript file under frontend/: run `npx eslint <saved file>` from the frontend/ directory.\n- Terraform file under infrastructure/: identify the layer that contains it (infrastructure/bootstrap or infrastructure/app) and run `terraform fmt -check -recursive` and `terraform validate` in that layer directory.\n\nIf a check fails, summarize each finding (file, line, rule id) and fix mechanical violations (formatting, import order, missing docstrings, unused imports) without changing behavior. List findings that need a design decision instead of fixing them."
+  }
+}

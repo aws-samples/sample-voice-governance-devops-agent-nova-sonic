@@ -1,0 +1,148 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voice-service"
+version = "0.1.0"
+description = "Nova Sonic Support Portal Voice_Service: FastAPI bridge between browser WebSockets, Amazon Nova 2 Sonic, and the AWS DevOps Agent."
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi~=0.141.1",
+    "uvicorn[standard]~=0.34.0",
+    "websockets~=14.1",
+    "aioboto3~=13.2",
+    "httpx~=0.28.1",
+    # Cognito JWT validation at the WebSocket handshake (app/auth): the
+    # [crypto] extra pulls in cryptography for RS256 signature verification
+    # against the user pool JWKS. Ships py.typed, so no mypy override.
+    "PyJWT[crypto]~=2.10",
+    # Smithy-based experimental Bedrock Runtime SDK: the only Python client
+    # supporting the HTTP/2 InvokeModelWithBidirectionalStream operation
+    # (Nova Sonic). Pre-1.0 with possible breaking minor releases, hence
+    # pinned to the 0.10 patch line; imported only in app/adapters.
+    "aws-sdk-bedrock-runtime~=0.10.0",
+    # Credential provider for the Smithy-based Bedrock SDK. NOT pulled in by
+    # aws-sdk-bedrock-runtime, and without it the ECS container credential
+    # source (169.254.170.2) is detected but unclaimed, so the bidirectional
+    # stream can never authenticate on Fargate and every voice session hangs
+    # until the WebSocket keepalive ping times out. See
+    # smithy_aws_core.identity.chain: "EcsContainer credential source was
+    # detected but no provider claims it; install 'aws-credentials-http'."
+    "aws-credentials-http",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest~=8.3.4",
+    "pytest-asyncio~=0.25.0",
+    "hypothesis~=6.122",
+    "ruff~=0.14",
+    "mypy~=1.18",
+    "interrogate~=1.7",
+    "import-linter~=2.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# --- Quality gates (Req 17.7): each tool below fails the build on violation ---
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+# D: docstrings, ASYNC: async pitfalls, BLE: no blind except, TRY: exception hygiene
+extend-select = ["D", "ASYNC", "BLE", "TRY"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["app", "tests"]
+
+# The experimental Bedrock streaming SDK (aws_sdk_bedrock_runtime, awscrt)
+# ships no py.typed marker and no stubs, so strict mode cannot resolve it;
+# the smithy runtime packages are typed but absent from tooling-only
+# environments. These targeted overrides keep the rest of the codebase
+# fully strict while treating only the SDK surface (confined to
+# app/adapters by import-linter) as untyped.
+[[tool.mypy.overrides]]
+module = [
+    "aws_sdk_bedrock_runtime.*",
+    "awscrt.*",
+    "smithy_core.*",
+    "smithy_aws_core.*",
+    "smithy_http.*",
+    # aioboto3, boto3, and botocore (the classic SDK surface used by the
+    # aioboto3-based adapters) likewise ship no usable strict-mode stubs.
+    "aioboto3.*",
+    "boto3.*",
+    "botocore.*",
+]
+ignore_missing_imports = true
+
+[tool.interrogate]
+# 100% docstring coverage on every module, class, method, and function (Req 17.1)
+fail-under = 100
+exclude = ["build", ".venv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+# AWS SDK imports are confined to app/adapters/ (Req 17.6)
+[tool.importlinter]
+root_package = "app"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "AWS SDK imports are confined to adapters"
+type = "forbidden"
+source_modules = [
+    "app.config",
+    "app.exceptions",
+    "app.logging",
+    "app.auth",
+    "app.domain",
+    "app.ports",
+    "app.orchestration",
+    "app.protocol",
+]
+forbidden_modules = [
+    "boto3",
+    "botocore",
+    "aioboto3",
+    "aiobotocore",
+    "aws_sdk_bedrock_runtime",
+    "smithy_core",
+    "smithy_aws_core",
+    "smithy_http",
+    "awscrt",
+]
+
+# The composition root (app.main) must import the adapter modules to wire
+# them, so it inevitably *transitively* reaches the SDKs those adapters
+# confine (Req 17.6). This companion contract keeps app.main itself
+# SDK-free: allow_indirect_imports restricts the check to direct imports,
+# so `import boto3` in app.main still fails the build while wiring
+# through app.adapters remains legal.
+[[tool.importlinter.contracts]]
+name = "The composition root imports no AWS SDK directly"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = ["app.main"]
+forbidden_modules = [
+    "boto3",
+    "botocore",
+    "aioboto3",
+    "aiobotocore",
+    "aws_sdk_bedrock_runtime",
+    "smithy_core",
+    "smithy_aws_core",
+    "smithy_http",
+    "awscrt",
+]

@@ -1,0 +1,37 @@
+# ci/frontend/test.yml — Frontend_Pipeline UnitTest stage (Req 16.3, 17.7).
+#
+# Runs the frontend test gate exactly as the repository defines it
+# (frontend/package.json, .kiro/steering/frontend.md): vitest with jsdom,
+# always non-interactive (--run), covering the unit suites and the
+# fast-check property suites under frontend/tests/.
+#
+# Node 24 (the toolchain target per package.json engines) is installed via
+# `n` on top of the standard:7.0 image's Node 18 runtime — see
+# ci/frontend/scan.yml for the rationale.
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    NODE_MAJOR: "24"
+    N_SPEC: "n@10.1.0"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: "18"
+    commands:
+      # --force is required: the standard:7.0 image already ships /usr/local/bin/n,
+      # so a plain global install fails with EEXIST and aborts the stage.
+      - npm install --global --force "$N_SPEC"
+      - n "$NODE_MAJOR"
+      - node --version
+      - test "$(node -p 'Number(process.versions.node.split(".")[0])')" -ge "$NODE_MAJOR"
+
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/frontend"
+      # Exact, reproducible install from package-lock.json.
+      - npm ci
+      # Non-interactive test run: unit + fast-check property suites.
+      - npx vitest --run

@@ -1,0 +1,55 @@
+# ci/frontend/build.yml — Frontend_Pipeline BuildAndPlan stage (Req 16.3).
+#
+# Produces the deployable static bundle as the BuildOutput artifact.
+#
+# The SPA is plain ES modules with no bundler and no `build` script in
+# frontend/package.json (checked; scripts are only `lint` and `test`), and
+# index.html loads Bootstrap from a pinned CDN URL — so `npm ci` would add
+# nothing to the artifact and is deliberately skipped here (dependencies
+# are dev tooling only; they are exercised in the SecurityScan and
+# UnitTest stages). "Building" therefore means assembling the deployable
+# directory exactly as the design lays out the served site:
+#
+#   dist/            <- frontend/public/*   (index.html, sw.js at the root:
+#                       the service worker needs root scope)
+#   dist/src/        <- frontend/src/*      (ES modules; index.html's
+#                       relative "../src/main.js" reference normalizes to
+#                       /src/main.js from the served root)
+#
+# dist/ MUST NOT contain config.json: it is generated at deploy time from
+# Terraform outputs (Req 14.3) so the built artifact stays
+# environment-independent — this stage fails if one is committed.
+#
+# If a bundler is ever introduced, replace the copy steps with `npm ci`
+# plus the package's build script, still emitting into dist/.
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR"
+      - rm -rf dist
+      - mkdir -p dist
+      # Static shell at the site root (dotfiles included via `/.`).
+      - cp -R frontend/public/. dist/
+      # ES modules under /src, preserving module paths.
+      - cp -R frontend/src dist/src
+      # Shape checks: the app shell, the root-scoped service worker, and
+      # the module entry point must all be where the site expects them.
+      - test -f dist/index.html
+      - test -f dist/sw.js
+      - test -f dist/src/main.js
+      # Environment independence (Req 14.3): a committed config.json would
+      # bake one environment's endpoints into every deploy.
+      - test ! -e dist/config.json
+
+artifacts:
+  # Becomes the pipeline's BuildOutput artifact: the Deploy stage adds the
+  # generated config.json and syncs this directory to the frontend bucket
+  # (ci/frontend/deploy.yml).
+  base-directory: dist
+  files:
+    - '**/*'

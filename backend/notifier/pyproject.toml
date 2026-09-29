@@ -1,0 +1,88 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "notifier"
+version = "0.1.0"
+description = "Nova Sonic Support Portal Notifier Lambda: normalizes EventBridge incident events and fans them out to AppSync Events, Web Push, and SNS."
+requires-python = ">=3.14"
+dependencies = [
+    "aioboto3~=13.2",
+    "httpx~=0.28.1",
+    # Web Push delivery with VAPID (Req 6.2); synchronous (requests-based),
+    # so the sender isolates every call via asyncio.to_thread (Req 17.3).
+    "pywebpush~=2.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest~=8.3.4",
+    "pytest-asyncio~=0.25.0",
+    "hypothesis~=6.122",
+    "ruff~=0.14",
+    "mypy~=1.18",
+    "interrogate~=1.7",
+    "import-linter~=2.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+# --- Quality gates (Req 17.7): each tool below fails the build on violation ---
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+# D: docstrings, ASYNC: async pitfalls, BLE: no blind except, TRY: exception hygiene
+extend-select = ["D", "ASYNC", "BLE", "TRY"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src", "tests"]
+
+# aioboto3, boto3, and botocore (the classic SDK surface used by the channel
+# and repository adapter modules) and pywebpush (the Web Push delivery
+# library) ship no py.typed marker and no usable strict-mode stubs. This
+# targeted override keeps the rest of the codebase fully strict while
+# treating only those library surfaces as untyped.
+[[tool.mypy.overrides]]
+module = [
+    "aioboto3.*",
+    "boto3.*",
+    "botocore.*",
+    "pywebpush.*",
+]
+ignore_missing_imports = true
+
+[tool.interrogate]
+# 100% docstring coverage on every module, class, method, and function (Req 17.1)
+fail-under = 100
+exclude = ["build", ".venv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+# The event normalizer is pure domain logic; AWS SDK access is confined to the
+# channel and repository adapter modules (Req 17.6).
+[tool.importlinter]
+root_package = "src"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Normalizer stays free of AWS SDK imports"
+type = "forbidden"
+source_modules = ["src.normalizer"]
+forbidden_modules = [
+    "boto3",
+    "botocore",
+    "aioboto3",
+    "aiobotocore",
+]

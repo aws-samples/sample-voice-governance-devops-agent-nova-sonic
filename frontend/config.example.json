@@ -1,0 +1,14 @@
+{
+  "cognito": {
+    "userPoolId": "REGION_POOLID_PLACEHOLDER",
+    "clientId": "CLIENT_ID_PLACEHOLDER",
+    "domain": "https://YOUR_DOMAIN_PREFIX.auth.REGION.amazoncognito.com"
+  },
+  "voiceWsUrl": "wss://YOUR_CLOUDFRONT_DOMAIN.cloudfront.net/ws/voice",
+  "events": {
+    "httpEndpoint": "https://YOUR_API_ID.appsync-api.REGION.amazonaws.com/event",
+    "realtimeEndpoint": "wss://YOUR_API_ID.appsync-realtime-api.REGION.amazonaws.com/event/realtime"
+  },
+  "vapidPublicKey": "VAPID_PUBLIC_KEY_PLACEHOLDER",
+  "region": "REGION_PLACEHOLDER"
+}

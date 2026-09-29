@@ -1,0 +1,64 @@
+# ci/backend/test.yml — Backend_Pipeline UnitTest stage (Req 16.3, 17.7).
+#
+# Runs every backend quality gate exactly as the repository defines them
+# (pyproject.toml of each package; .kiro/steering/backend.md), for BOTH
+# packages — backend/voice_service and backend/notifier — plus the shared
+# primitives (backend/shared), which are checked with the voice service's
+# configuration since they carry no pyproject of their own:
+#
+#   ruff check            (D, ASYNC, BLE, TRY rule groups)
+#   mypy --strict         (MYPYPATH=<repo>/backend resolves `shared`)
+#   interrogate           (--fail-under=100 from pyproject)
+#   lint-imports          (AWS SDK imports confined to adapters/)
+#   pytest                (unit + hypothesis property suites, no AWS access)
+#
+# Tool versions come from each package's [dev] extra (ruff~=0.14,
+# mypy~=1.18, interrogate~=1.7, import-linter~=2.1, pytest~=8.3.4,
+# hypothesis~=6.122) so CI and local runs stay pinned identically.
+#
+# Python 3.14 is not pre-installed on aws/codebuild/standard:7.0; the
+# pre-installed 3.11 runtime only bootstraps uv, which provisions the
+# CPython 3.14 both packages require (requires-python = ">=3.14").
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    PYTHON_VERSION: "3.14"
+    UV_SPEC: "uv~=0.9"
+
+phases:
+  install:
+    runtime-versions:
+      python: "3.11"
+    commands:
+      - pip install --quiet "$UV_SPEC"
+      - uv python install "$PYTHON_VERSION"
+
+  build:
+    commands:
+      # ----------------------------------------------------------------
+      # voice_service gates (its config also covers backend/shared).
+      # ----------------------------------------------------------------
+      - cd "$CODEBUILD_SRC_DIR/backend/voice_service"
+      - uv venv --python "$PYTHON_VERSION" .venv
+      - uv pip install --quiet --python .venv/bin/python ".[dev]"
+      - .venv/bin/ruff check app tests ../shared
+      - MYPYPATH="$CODEBUILD_SRC_DIR/backend" .venv/bin/mypy
+      - .venv/bin/interrogate app tests
+      # shared/ has no pyproject of its own, so the 100% bar is explicit
+      # here (the package pyprojects carry it via [tool.interrogate]).
+      - .venv/bin/interrogate --fail-under=100 ../shared
+      - PYTHONPATH="$CODEBUILD_SRC_DIR/backend" .venv/bin/lint-imports
+      - PYTHONPATH="$CODEBUILD_SRC_DIR/backend" .venv/bin/python -m pytest -q
+      # ----------------------------------------------------------------
+      # notifier gates.
+      # ----------------------------------------------------------------
+      - cd "$CODEBUILD_SRC_DIR/backend/notifier"
+      - uv venv --python "$PYTHON_VERSION" .venv
+      - uv pip install --quiet --python .venv/bin/python ".[dev]"
+      - .venv/bin/ruff check src tests
+      - MYPYPATH="$CODEBUILD_SRC_DIR/backend" .venv/bin/mypy
+      - .venv/bin/interrogate src tests
+      - PYTHONPATH="$CODEBUILD_SRC_DIR/backend" .venv/bin/lint-imports
+      - PYTHONPATH="$CODEBUILD_SRC_DIR/backend" .venv/bin/python -m pytest -q

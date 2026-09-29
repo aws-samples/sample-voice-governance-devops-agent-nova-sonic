@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "name": "Test on Save",
+  "description": "Runs the unit and property tests that match a saved source file: pytest for Python under backend/, vitest for JavaScript under frontend/.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "backend/**/*.py",
+      "frontend/src/**/*.js",
+      "frontend/tests/**/*.js"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "A source file was just saved. Run the tests that cover it and report the results.\n\n- Python test file (under a tests/ directory): run exactly that file with `python -m pytest <file> -q` from the owning package directory (backend/voice_service or backend/notifier).\n- Python source file: locate the matching unit and property tests in the owning package's tests/ tree (tests importing or exercising the saved module) and run them with `python -m pytest <paths> -q`; if no specific match exists, run the package's full test suite.\n- JavaScript test file: run `npx vitest --run <file>` from the frontend/ directory.\n- JavaScript source file: run `npx vitest related <file> --run` from the frontend/ directory; if no related tests are found, run `npx vitest --run`.\n\nAlways use non-interactive flags (`-q` for pytest, `--run` for vitest). Report pass/fail counts. If a test fails, summarize the failure (test name, assertion, and the hypothesis or fast-check counterexample when one is reported) — do not attempt broad refactors from a hook run."
+  }
+}

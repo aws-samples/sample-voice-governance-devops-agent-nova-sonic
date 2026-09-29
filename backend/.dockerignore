@@ -1,0 +1,21 @@
+# Build-context excludes for images built FROM backend/ (see
+# voice_service/Dockerfile header for the context contract).
+
+# Tool caches
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.hypothesis
+**/.import_linter_cache
+
+# Test suites never ship in images
+**/tests/
+
+# The notifier deploys as a Lambda package, not via this image
+notifier/
+
+# Docs and local environments
+*.md
+**/.venv
+**/uv.lock

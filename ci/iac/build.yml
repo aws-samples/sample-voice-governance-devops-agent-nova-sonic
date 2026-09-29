@@ -1,0 +1,121 @@
+# ci/iac/build.yml — IaC_Pipeline BuildAndPlan stage (Req 15.6, 16.3).
+#
+# Two jobs, in order:
+#
+#   1. Package the Notifier Lambda deployment zip from backend/notifier —
+#      the app layer's `lambda_zip_path` variable requires it to exist
+#      before plan/apply (infrastructure/app/modules/notifications).
+#   2. `terraform plan -out=tfplan` for the app layer against the remote
+#      backend the bootstrap layer created (Req 15.6), saving the EXACT
+#      plan file for the manual approval review and the Deploy stage
+#      (Req 16.6, 16.7).
+#
+# NOTIFIER ZIP LAYOUT (module contract, verified against
+# infrastructure/app/modules/notifications/main.tf and
+# backend/notifier/src/handler.py): the zip root carries
+#   src/       — the notifier package  (handler = src.handler.handler)
+#   shared/    — backend/shared        (the handler imports `from shared...`)
+#   <deps>/    — third-party packages installed flat at the zip root
+# Dependencies are resolved by pip/uv FOR CPython 3.14 (the function's
+# runtime is python3.14) ON this build's linux platform — the CodeBuild
+# image (standard:7.0) is x86_64, matching the module's default
+# lambda_architectures = ["x86_64"]; keep the two in step if either
+# changes (native wheels: cryptography via pywebpush).
+#
+# TFVARS CONTRACT: the operator commits the app layer's NON-SECRET
+# environment values to the iac source archive as
+# infrastructure/app/envs/<env>.tfvars — exactly one such file per
+# archive (this stage fails if several are present, and falls back to
+# Terraform's auto-loaded terraform.tfvars / *.auto.tfvars when none is).
+# Required app variables with no defaults (environment,
+# access_logging_bucket_name, container_image, devops_agent_space_id,
+# cognito_domain_prefix, vapid_*) fail the plan with a clear message when
+# absent (Req 15.7). `container_image` must carry the image URI the
+# backend pipeline last deployed (see the ownership note in
+# ci/backend/deploy.yml). `lambda_zip_path` is always injected by this
+# stage — a tfvars value for it is overridden.
+#
+# Required CodeBuild environment variables (bootstrap pipeline module):
+#   TF_STATE_BUCKET — app-layer state bucket (bootstrap state_backend)
+#   TF_LOCK_TABLE   — DynamoDB lock table    (bootstrap state_backend)
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    TERRAFORM_VERSION: "1.9.8"
+    PYTHON_VERSION: "3.14"
+    UV_SPEC: "uv~=0.9"
+
+phases:
+  install:
+    runtime-versions:
+      python: "3.11"
+    commands:
+      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - unzip -o -q /tmp/terraform.zip -d /usr/local/bin
+      - terraform -version
+      - pip install --quiet "$UV_SPEC"
+      - uv python install "$PYTHON_VERSION"
+
+  pre_build:
+    commands:
+      - ': "${TF_STATE_BUCKET:?TF_STATE_BUCKET must be set on the CodeBuild project (wired by infrastructure/bootstrap)}"'
+      - ': "${TF_LOCK_TABLE:?TF_LOCK_TABLE must be set on the CodeBuild project (wired by infrastructure/bootstrap)}"'
+      # Package the Notifier zip (layout contract in the header comment).
+      # The zip lands INSIDE infrastructure/app so the lambda_zip_path
+      # variable can stay a cwd-relative path that resolves identically at
+      # plan time (here) and at apply time (Deploy stage, which restores
+      # the artifact to the same relative location).
+      - |
+        set -euo pipefail
+        stage_dir=/tmp/notifier-package
+        rm -rf "$stage_dir"
+        mkdir -p "$stage_dir"
+        # Notifier package + its runtime dependency set, resolved for
+        # CPython 3.14, installed flat at the zip root.
+        uv pip install --quiet --python "$PYTHON_VERSION" --target "$stage_dir" "$CODEBUILD_SRC_DIR/backend/notifier"
+        # Shared backend primitives as the sibling top-level package the
+        # handler imports (`from shared...`).
+        cp -R "$CODEBUILD_SRC_DIR/backend/shared" "$stage_dir/shared"
+        # Never ship bytecode caches (clean archives carry none; local
+        # zips might).
+        find "$stage_dir" -type d -name '__pycache__' -prune -exec rm -rf {} +
+        mkdir -p "$CODEBUILD_SRC_DIR/infrastructure/app/notifier-dist"
+        (cd "$stage_dir" && zip -qr "$CODEBUILD_SRC_DIR/infrastructure/app/notifier-dist/notifier.zip" .)
+        ls -l "$CODEBUILD_SRC_DIR/infrastructure/app/notifier-dist/notifier.zip"
+
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/infrastructure/app"
+      # Remote backend from bootstrap outputs (Req 15.6): the backend block
+      # in main.tf is an empty partial configuration on purpose — bucket,
+      # key, region, and lock table arrive only here.
+      - terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}" -backend-config="key=app/terraform.tfstate" -backend-config="region=${AWS_REGION}" -backend-config="dynamodb_table=${TF_LOCK_TABLE}"
+      # Resolve the tfvars contract (header comment), then plan. -var is
+      # passed AFTER -var-file so the pipeline-built zip path always wins.
+      - |
+        set -euo pipefail
+        tfvars_args=""
+        if [ -d envs ]; then
+          tfvars_count="$(find envs -maxdepth 1 -name '*.tfvars' | wc -l | tr -d ' ')"
+          if [ "$tfvars_count" -eq 1 ]; then
+            tfvars_args="-var-file=$(find envs -maxdepth 1 -name '*.tfvars')"
+            echo "Using variable file: ${tfvars_args#-var-file=}"
+          elif [ "$tfvars_count" -gt 1 ]; then
+            echo "ERROR: multiple envs/*.tfvars files in the archive; commit exactly one per environment." >&2
+            exit 1
+          fi
+        fi
+        terraform plan -input=false -out=tfplan \
+          $tfvars_args \
+          -var "lambda_zip_path=notifier-dist/notifier.zip"
+
+artifacts:
+  # Becomes the pipeline's BuildOutput artifact: the EXACT reviewed plan
+  # plus the zip that plan hashed — the Deploy stage applies these bytes
+  # and nothing else (Req 16.6, 16.7).
+  base-directory: infrastructure/app
+  files:
+    - tfplan
+    - notifier-dist/notifier.zip

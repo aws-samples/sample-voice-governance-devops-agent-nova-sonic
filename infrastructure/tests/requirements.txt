@@ -1,0 +1,4 @@
+# Terraform plan-assertion suite (task 13.2) — installed by the iac
+# pipeline's test buildspec before running pytest against this directory.
+# Pinned to the same pytest series the backend packages use (pytest~=8.3.4).
+pytest==8.3.5

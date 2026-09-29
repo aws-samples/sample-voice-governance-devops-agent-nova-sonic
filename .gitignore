@@ -1,0 +1,143 @@
+ash_output
+
+# ==========================================
+# TERRAFORM
+# ==========================================
+# Local .terraform directories containing architecture-specific binaries
+.terraform/
+
+# Distributed state files (can contain secrets/passwords in plain text)
+*.tfstate
+*.tfstate.*
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Exclude all variable files since they typically contain secrets/credentials
+*.tfvars
+*.tfvars.json
+
+# ...except the app-layer environment tfvars, which carry NON-SECRET values
+# only and MUST be committed: the IaC pipeline reads them from the committed
+# git tree (scripts/push-source.sh packages source.zip via `git archive HEAD`),
+# and ci/iac/build.yml requires exactly one envs/*.tfvars to plan the app
+# layer. Secrets stay out by design - only the VAPID parameter NAME appears
+# here, never key material.
+!infrastructure/app/envs/*.tfvars
+
+# Ignore override files as they are local-only modifications
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Ignore transient lock files created by terraform apply
+.terraform.tfstate.lock.info
+
+# Ignore CLI configuration files
+.terraformrc
+terraform.rc
+
+# Include tfplan files if you run 'terraform plan -out=tfplan'
+*tfplan*
+
+
+# ==========================================
+# PYTHON
+# ==========================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+bin/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Inline/Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+
+# ==========================================
+# NODE.JS
+# ==========================================
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Snowpack dependency directory
+web_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Output directory from new tools like Microsoft Rush
+common/deploy/
+
+# Output directory from next.js / nuxt.js / gatsby (if frontend is used)
+.next/
+.nuxt/
+.cache/
+
+# Production build artifacts
+dist/
+out/
+build/
+
+
+# ==========================================
+# OPERATING SYSTEMS & IDEs (Recommended)
+# ==========================================
+# macOS hidden files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows hidden files
+Thumbs.db
+Ehthumbs.db
+desktop.ini
+
+# JetBrains (VS Code / IntelliJ) local settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp

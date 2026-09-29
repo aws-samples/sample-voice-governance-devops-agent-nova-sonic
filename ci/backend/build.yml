@@ -1,0 +1,69 @@
+# ci/backend/build.yml — Backend_Pipeline BuildAndPlan stage (Req 16.3).
+#
+# Builds the Voice_Service container image and pushes it to the ECR
+# repository the bootstrap layer created (scan-on-push enabled there,
+# Req 12.3), then hands the exact pushed image URI to the Deploy stage
+# through the BuildOutput artifact (image-uri.txt).
+#
+# Build-context contract (see backend/voice_service/Dockerfile): the
+# context is backend/ — NOT backend/voice_service/ — because the image
+# copies both sibling top-level packages (`app` and `shared`):
+#
+#     docker build -f voice_service/Dockerfile .
+#
+# This stage runs in privileged mode (bootstrap wires
+# build_privileged_mode = true for the backend pipeline), so the Docker
+# daemon of the managed standard:7.0 image is available.
+#
+# Tagging: the ECR repository is IMMUTABLE-tagged, so every push needs a
+# fresh tag. The tag is <commit-ish>-b<build-number>: the commit-ish part
+# (CODEBUILD_RESOLVED_SOURCE_VERSION — the S3 source object version — with
+# a fallback to the build id) keeps the image traceable to its source
+# archive, and the build-number suffix keeps stage retries of the same
+# source version from colliding with the immutable earlier tag.
+#
+# Required CodeBuild environment variables (bootstrap pipeline module):
+#   ECR_REPOSITORY_URL — <account>.dkr.ecr.<region>.amazonaws.com/<repo>
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  pre_build:
+    commands:
+      - ': "${ECR_REPOSITORY_URL:?ECR_REPOSITORY_URL must be set on the CodeBuild project (wired by infrastructure/bootstrap)}"'
+      # Derive a Docker-safe tag from the resolved source version: keep
+      # [A-Za-z0-9_.-], replace everything else, cap the length, and make
+      # sure the tag never starts with '.' or '-'.
+      - |
+        set -euo pipefail
+        raw_ref="${CODEBUILD_RESOLVED_SOURCE_VERSION:-${CODEBUILD_BUILD_ID##*:}}"
+        safe_ref="$(printf '%s' "$raw_ref" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-96)"
+        case "$safe_ref" in
+          [.-]*) safe_ref="v${safe_ref}" ;;
+        esac
+        IMAGE_TAG="${safe_ref}-b${CODEBUILD_BUILD_NUMBER:-0}"
+        IMAGE_URI="${ECR_REPOSITORY_URL}:${IMAGE_TAG}"
+        printf '%s' "$IMAGE_URI" > /tmp/image-uri.txt
+        echo "Building image $IMAGE_URI"
+      # ECR login: registry host is the repository URL up to the first '/'.
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${ECR_REPOSITORY_URL%%/*}"
+
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/backend"
+      - docker build -f voice_service/Dockerfile -t "$(cat /tmp/image-uri.txt)" .
+      # Push in the build phase (not post_build, which also runs after a
+      # failed build) so the image is only ever pushed after a successful
+      # docker build.
+      - docker push "$(cat /tmp/image-uri.txt)"
+      # The Deploy stage reads this file from the BuildOutput artifact and
+      # registers a new task-definition revision pointing at it.
+      - cp /tmp/image-uri.txt "$CODEBUILD_SRC_DIR/image-uri.txt"
+
+artifacts:
+  # Becomes the pipeline's BuildOutput artifact — exactly what the manual
+  # approval reviewed and the Deploy stage consumes (Req 16.6, 16.7).
+  files:
+    - image-uri.txt

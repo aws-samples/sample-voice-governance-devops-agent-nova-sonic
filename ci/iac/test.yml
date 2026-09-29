@@ -1,0 +1,70 @@
+# ci/iac/test.yml — IaC_Pipeline UnitTest stage (Req 16.3; steering:
+# infrastructure quality gates).
+#
+# Gates, in order:
+#
+#   1. terraform fmt -check -recursive   over infrastructure/ (both layers)
+#   2. terraform init -backend=false + terraform validate
+#                                        in infrastructure/bootstrap AND
+#                                        infrastructure/app (no backend, no
+#                                        state, no AWS credentials touched)
+#   3. plan-assertion suite              pytest under infrastructure/tests/
+#                                        (optional task 13.2) — guarded by
+#                                        an existence check so this
+#                                        buildspec works with or without it
+#
+# Terraform is pinned to a released version satisfying both layers'
+# required_version (>= 1.9); download over TLS from the official HashiCorp
+# release host.
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    TERRAFORM_VERSION: "1.9.8"
+    PYTHON_VERSION: "3.14"
+    UV_SPEC: "uv~=0.9"
+    PYTEST_SPEC: "pytest~=8.3"
+
+phases:
+  install:
+    runtime-versions:
+      python: "3.11"
+    commands:
+      - curl -fsSL -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+      - unzip -o -q /tmp/terraform.zip -d /usr/local/bin
+      - terraform -version
+      # uv only bootstraps the optional plan-assertion suite's Python.
+      - pip install --quiet "$UV_SPEC"
+
+  build:
+    commands:
+      # Canonical formatting across both layers and all modules.
+      - terraform fmt -check -recursive "$CODEBUILD_SRC_DIR/infrastructure"
+      # Layer validation without backend or credentials: providers are
+      # downloaded, configuration is type- and reference-checked.
+      - cd "$CODEBUILD_SRC_DIR/infrastructure/bootstrap"
+      - terraform init -backend=false -input=false
+      - terraform validate
+      - cd "$CODEBUILD_SRC_DIR/infrastructure/app"
+      - terraform init -backend=false -input=false
+      - terraform validate
+      # Optional plan-assertion suite (task 13.2): pytest against
+      # `terraform show -json` verifying the steering security defaults.
+      # Guarded so the pipeline is green before that suite lands.
+      - |
+        set -euo pipefail
+        cd "$CODEBUILD_SRC_DIR"
+        if [ -d infrastructure/tests ]; then
+          echo "infrastructure/tests/ found - running the plan-assertion suite"
+          uv python install "$PYTHON_VERSION"
+          uv venv --python "$PYTHON_VERSION" /tmp/iac-tests
+          if [ -f infrastructure/tests/requirements.txt ]; then
+            uv pip install --quiet --python /tmp/iac-tests/bin/python -r infrastructure/tests/requirements.txt
+          else
+            uv pip install --quiet --python /tmp/iac-tests/bin/python "$PYTEST_SPEC"
+          fi
+          /tmp/iac-tests/bin/python -m pytest infrastructure/tests -q
+        else
+          echo "infrastructure/tests/ not present - skipping the optional plan-assertion suite (task 13.2)"
+        fi

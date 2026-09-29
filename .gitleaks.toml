@@ -1,0 +1,34 @@
+# gitleaks configuration for the Nova Sonic Support Portal.
+#
+# gitleaks auto-loads .gitleaks.toml from the root of the scanned source, so
+# ci/iac/scan.yml, ci/backend/scan.yml and ci/frontend/scan.yml pick this up
+# without any change to their `gitleaks detect --source "$CODEBUILD_SRC_DIR"`
+# invocation.
+#
+# Everything here is a documented FALSE POSITIVE of the built-in
+# generic-api-key rule against committed, non-secret source. No real
+# credential is suppressed: the portal keeps every secret out of the tree by
+# design (the VAPID private key and the origin-verify value live in SSM, and
+# only their parameter NAMES appear in source).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented false positives on non-secret project source"
+
+regexes = [
+  # scripts/smoke/02-appsync-auth.sh: the literal example WebSocket key from
+  # RFC 6455 section 1.3 (base64 of "the sample nonce"). It is a public test
+  # vector used only to perform an HTTP Upgrade handshake, and the script
+  # prefers `openssl rand -base64 16` when openssl is available.
+  '''dGhlIHNhbXBsZSBub25jZQ==''',
+]
+
+paths = [
+  # scripts/deploy.sh: matched on the block of EMPTY variable initialisers
+  # (TEMP_PASSWORD="", VAPID_PARAM_NAME="", ...) near the top of the script.
+  # There are no literal values in the file at all - every secret it handles
+  # is read at runtime from SSM or from a no-echo prompt.
+  '''scripts/deploy\.sh$''',
+]

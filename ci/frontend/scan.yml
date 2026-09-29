@@ -1,0 +1,65 @@
+# ci/frontend/scan.yml — Frontend_Pipeline SecurityScan stage (Req 16.3,
+# 16.4).
+#
+# Three gates, each failing the build on findings:
+#
+#   1. gitleaks                        — secret scan over the archive
+#                                        (Req 14.2, 16.4), run BEFORE
+#                                        npm ci so node_modules is never
+#                                        scanned
+#   2. npm audit --audit-level=high    — dependency advisories from the
+#                                        committed package-lock.json; exits
+#                                        non-zero only for high or critical
+#                                        advisories (Req 16.4)
+#   3. eslint                          — the repo's lint gate (flat config
+#                                        with jsdoc rules; frontend/
+#                                        eslint.config.js)
+#
+# Node 24 (the toolchain target per frontend/package.json engines and
+# .kiro/steering/frontend.md) is not pre-installed on
+# aws/codebuild/standard:7.0; the pre-installed Node 18 runtime bootstraps
+# `n`, which installs the newest Node 24.x. The standard images manage
+# their Node runtimes with `n`, so the installed version becomes the
+# active `node` on PATH.
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    NODE_MAJOR: "24"
+    N_SPEC: "n@10.1.0"
+    GITLEAKS_VERSION: "8.21.2"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: "18"
+    commands:
+      - curl -fsSL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+      - tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+      - gitleaks version
+      # --force is required: the standard:7.0 image already ships /usr/local/bin/n,
+      # so a plain global install fails with EEXIST and aborts the stage.
+      - npm install --global --force "$N_SPEC"
+      - n "$NODE_MAJOR"
+      # Hard-fail if the freshly installed Node did not become active.
+      - node --version
+      - test "$(node -p 'Number(process.versions.node.split(".")[0])')" -ge "$NODE_MAJOR"
+
+  pre_build:
+    commands:
+      # Secret scan FIRST, before npm ci writes node_modules into the tree.
+      # --no-git: the CodePipeline source artifact carries no .git dir.
+      # --redact: never print candidate secret values into build logs.
+      - gitleaks detect --no-git --redact --source "$CODEBUILD_SRC_DIR"
+
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/frontend"
+      # Advisory audit straight from the lockfile: fails the stage only on
+      # high or critical advisories (Req 16.4).
+      - npm audit --audit-level=high
+      # Exact, reproducible install from package-lock.json, then the repo's
+      # lint gate (eslint flat config with jsdoc rules).
+      - npm ci
+      - npx eslint .
