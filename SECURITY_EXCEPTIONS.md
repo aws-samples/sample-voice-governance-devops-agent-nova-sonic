@@ -71,7 +71,7 @@ apt invocation or maintainer script can need the interpreter.
 | | |
 |---|---|
 | Installed | `1:1.3.dfsg+really1.3.1-1+b1` (Debian 13 trixie, upstream **1.3.1**) |
-| Debian status | bookworm, trixie, **and** forky/sid all marked vulnerable; unstable `(unfixed)` — verified 2026-09-20 on security-tracker.debian.org, Debian bug 1146895 |
+| Debian status | bookworm, trixie, **and** forky/sid all marked vulnerable; unstable `(unfixed)` — re-verified 2026-09-29 on security-tracker.debian.org, Debian bug 1146895 |
 | Fix available | **No.** Upstream has a commit (`df84af2`) but no release. grype reports `fix state: not-fixed`, `fix versions: []` |
 | Severity | High |
 | Assessment | Not reachable; installed version below the advisory's stated range |

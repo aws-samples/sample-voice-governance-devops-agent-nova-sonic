@@ -2,7 +2,7 @@
 
 > **Sample code notice:** This project is sample code for demonstration and educational purposes only. It is not intended for production use without additional security review and hardening. See [SECURITY.md](SECURITY.md) for production hardening recommendations.
 
-A voice-driven AWS support portal for DevOps engineers. An engineer speaks into the browser; Amazon Nova 2 Sonic (Bedrock speech-to-speech, us-east-1) transcribes and converses over a bidirectional stream, forwarding diagnostic questions as text to the AWS DevOps Agent through a Nova Sonic tool named `ask_devops_agent`. Every tool call is gated **fail-closed** by an Amazon Bedrock Guardrail with Automated Reasoning checks: only requests classified as read/diagnostic operations ever reach the agent. The agent's streamed answer is spoken back to the engineer.
+A voice-driven AWS support portal for DevOps engineers. An engineer speaks into the browser; Amazon Nova 2 Sonic (Bedrock speech-to-speech, us-east-1) transcribes and converses over a bidirectional stream, forwarding diagnostic questions as text to the AWS DevOps Agent through a Nova Sonic tool named `ask_devops_agent`. Every tool call is gated **fail-closed** (any error counts as a block) by a deterministic mutation-verb check followed by an Amazon Bedrock Guardrail with a denied topic and content filters: only requests classified as read/diagnostic operations ever reach the agent. The agent then reads the account through a read-only IAM role that you associate with the Agent Space. The agent's streamed answer is spoken back to the engineer.
 
 The portal also pushes incident notifications: EventBridge events (CloudWatch Alarms, Incident Manager, DevOps Agent findings) drive a Notifier Lambda that fans out to an AppSync Events channel (in-app popup + chime) and to Web Push subscriptions (browser closed), with optional SNS escalation. Voice sessions survive Bedrock's 8-minute stream cap through session segmentation with context replay, and survive disconnects through reconnect with transcript restore from DynamoDB.
 
@@ -29,7 +29,7 @@ graph TB
 
     subgraph AWS["AWS services"]
         NS["Nova 2 Sonic<br/>InvokeModelWithBidirectionalStream"]
-        GR["Bedrock Guardrail +<br/>Automated Reasoning (fail-closed)"]
+        GR["Bedrock Guardrail<br/>denied topic + filters (fail-closed)"]
         DA["AWS DevOps Agent"]
         DDB[("DynamoDB x4:<br/>sessions, chats,<br/>subscriptions, transcripts")]
         COG["Cognito user pool (PKCE)"]
@@ -65,7 +65,7 @@ graph TB
 | Voice ingress | ALB (HTTP listener) | Forwards only requests carrying the CloudFront-injected `x-origin-verify` secret; deletion protection on |
 | Voice_Service | ECS Fargate (min 2 tasks, 2+ AZs) | WebSocket endpoint, Bedrock streaming, segmentation, tool routing, task scale-in protection |
 | Speech model | Bedrock Nova 2 Sonic | `InvokeModelWithBidirectionalStream` over HTTP/2 in us-east-1 |
-| Guardrail | Bedrock Guardrail + Automated Reasoning policy | Fail-closed gate evaluated via `ApplyGuardrail` before every DevOps Agent call |
+| Guardrail | Mutation-verb check + Bedrock Guardrail (denied topic, content filters) | Fail-closed gate evaluated via `ApplyGuardrail` before every DevOps Agent call |
 | Diagnostics | AWS DevOps Agent (`aidevops:CreateChat` / `SendMessage`) | Answers engineer questions; one chat per voice session, optionally executionId-scoped |
 | Session store | DynamoDB: `{env}-voice-sessions` (GSI `by-engineer`), `{env}-agent-chats`, `{env}-push-subscriptions`, `{env}-transcripts` | Session state, chat mappings, push subscriptions, transcripts; TTL + SSE + PITR |
 | In-app notifications | AppSync Events API (channel `/incidents/all`) | Cognito-authorized realtime subscription; IAM publish from the Notifier |
@@ -104,8 +104,8 @@ Each pipeline runs **Source → SecurityScan → UnitTest → BuildAndPlan → M
 
 | Requirement | Notes |
 |---|---|
-| AWS account with Bedrock access in **us-east-1** | Nova 2 Sonic (`amazon.nova-2-sonic-v1:0`) and Bedrock Guardrails with Automated Reasoning checks enabled |
-| AWS DevOps Agent enabled | You need the agent **space id** (`devops_agent_space_id` variable) |
+| AWS account in **us-east-1** that can invoke Amazon Nova 2 Sonic | `amazon.nova-2-sonic-v1:0`. Amazon Bedrock serverless models are available by default; make sure no IAM policy or SCP denies it (step 0b). The reference implementation deploys in us-east-1 because the CloudFront-scope AWS WAF web ACL must live there |
+| An AWS DevOps Agent Agent Space | You need its **space id** (`devops_agent_space_id` variable). See [Creating an Agent Space](https://docs.aws.amazon.com/devopsagent/latest/userguide/getting-started-with-aws-devops-agent-creating-an-agent-space.html) |
 | Pre-existing S3 access-logging bucket | Receives ALB access logs. The stack only references it (`access_logging_bucket_name`) and **never creates it** |
 | Terraform >= 1.9 | Pipelines pin 1.9.8 |
 | AWS CLI v2 | Credentials able to apply the bootstrap layer and upload source archives |
@@ -234,23 +234,19 @@ These live outside the repo. `deploy.sh` checks your credentials but cannot prov
 aws sts get-caller-identity
 ```
 
-**0b. Enable Bedrock model access to Nova 2 Sonic** (one-time, per account/region). Request access in the console — Bedrock model access cannot be granted via a plain CLI call:
-
-- Open **Amazon Bedrock → Model access** in `us-east-1`: `https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1#/modelaccess`
-- Enable **Amazon → Nova 2 Sonic** (`amazon.nova-2-sonic-v1:0`). Verify it appears once granted:
+**0b. Confirm you can invoke Amazon Nova 2 Sonic** (one-time, per account/Region). Amazon Bedrock now gives accounts access to serverless models by default; the old Model access page is retired ([Simplified model access in Amazon Bedrock](https://aws.amazon.com/blogs/security/simplified-amazon-bedrock-model-access/)). You only need to make sure that no IAM policy or service control policy denies the model. Verify the model is offered in the Region:
 
 ```bash
 aws bedrock list-foundation-models --region us-east-1 \
   --query "modelSummaries[?modelId=='amazon.nova-2-sonic-v1:0'].modelId" --output text
-# prints amazon.nova-2-sonic-v1:0 when access is active
+# prints amazon.nova-2-sonic-v1:0
 ```
 
-**0c. Obtain the DevOps Agent space id.** The AWS DevOps Agent service model is not in the AWS CLI/botocore catalog yet, so there is **no `aws` command to list spaces** — you get the id from the DevOps Agent enablement:
-
-- Enable the AWS DevOps Agent for your account and open its console; the **space id** is shown in the agent space's settings/URL. Record it for step 3:
+**0c. Obtain the DevOps Agent space id.** Create an Agent Space if you do not have one ([Creating an Agent Space](https://docs.aws.amazon.com/devopsagent/latest/userguide/getting-started-with-aws-devops-agent-creating-an-agent-space.html)), then list your spaces with the AWS CLI (version 2.36 or later includes the `devops-agent` commands):
 
 ```bash
-export DEVOPS_AGENT_SPACE_ID=<agent-space-id>   # from the DevOps Agent console
+aws devops-agent list-agent-spaces --region us-east-1 --output table
+export DEVOPS_AGENT_SPACE_ID=<agent-space-id>   # from the output above
 ```
 
 **0d. Ensure an S3 access-logging bucket exists** (the stack references it, never creates it). Reuse an existing one, or create a compliant bucket:
@@ -322,6 +318,42 @@ scripts/deploy.sh infra --project "$PROJECT" --environment "$ENVIRONMENT"
 
 The script pushes the source, waits for the pipeline, and pauses at the **ManualApproval** gate: review the `BuildAndPlan` output in the CodePipeline console, then answer the prompt to approve. Add `--auto-approve` to skip the prompt and approve automatically once `BuildAndPlan` succeeds. (The ECS service will show 0 running tasks until step 4 — expected.)
 
+#### 3b. Associate this account with the Agent Space (required)
+
+Terraform creates the read-only role the agent assumes (`<env>-devops-agent-readonly`), but the AWS provider has no DevOps Agent resources, so it cannot tell the Agent Space to use it. **Until you do this, the agent cannot see any resource in this account**, and it answers questions about another associated account or with empty results, without an error.
+
+Get the role ARN:
+
+```bash
+AGENT_ROLE_ARN=$(scripts/deploy.sh outputs --project "$PROJECT" --environment "$ENVIRONMENT" \
+  | jq -r '.devops_agent_assumable_role_arn.value')
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+echo "$AGENT_ROLE_ARN"
+```
+
+The role's trust policy allows `aidevops.amazonaws.com` only with `aws:SourceAccount` equal to this account, so the Agent Space must be in the same account as the deployment.
+
+**Console:** open the AWS DevOps Agent console, select your Agent Space, choose the **Capabilities** tab, and in the **Cloud** section add this account (as the primary source if the space has none, otherwise under **Secondary sources**). Choose to use an existing role and enter `$AGENT_ROLE_ARN`. See [Connecting multiple AWS accounts](https://docs.aws.amazon.com/devopsagent/latest/userguide/configuring-integrations-and-knowledge-connecting-multiple-aws-accounts.html).
+
+**CLI** (adds the account as a secondary source):
+
+```bash
+aws devops-agent associate-service --region us-east-1 \
+  --agent-space-id "$DEVOPS_AGENT_SPACE_ID" --service-id aws \
+  --configuration "{\"aws\":{\"accountId\":\"$ACCOUNT_ID\",\"accountType\":\"monitor\",\"assumableRoleArn\":\"$AGENT_ROLE_ARN\"}}"
+```
+
+Do **not** configure the optional elevated role (`agentElevatedRoleArn`). It is the write-capable role for agent actions, and this portal is read-only by design. If the console wizard created an elevated role or its own broader role for another account, remove that association or its elevated role.
+
+Verify:
+
+```bash
+aws devops-agent list-associations --region us-east-1 --agent-space-id "$DEVOPS_AGENT_SPACE_ID" \
+  --query 'associations[].configuration'
+```
+
+Your account ID should appear with `assumableRoleArn` set to `$AGENT_ROLE_ARN` and no `agentElevatedRoleArn`. After you ask the portal a question, `aws iam get-role --role-name "${ENVIRONMENT}-devops-agent-readonly" --query Role.RoleLastUsed` shows a timestamp.
+
 #### 4. Build and deploy the backend image, then re-pin the image tag
 
 ```bash
@@ -383,7 +415,7 @@ scripts/deploy.sh all --project "$PROJECT" --environment "$ENVIRONMENT" --auto-a
 
 Or run just the stage you changed — `infra`, `backend`, or `frontend`. Re-running any stage (or `all`) never creates duplicate or orphaned resources.
 
-**What still needs a human, and why:** enabling Bedrock / DevOps Agent access and providing the access-logging bucket (account entitlements, step 0); committing `envs/<env>.tfvars` (the IaC pipeline reads the committed git tree, and the VAPID public key + image digest are only known after earlier stages); approving each pipeline's ManualApproval gate (omit with `--auto-approve`); and re-pinning `container_image` after a backend deploy (step 4). Everything else is automated by `deploy.sh`.
+**What still needs a human, and why:** confirming Bedrock model availability and providing the access-logging bucket (account entitlements, step 0); associating the account with the Agent Space (step 3b, no Terraform resource exists); committing `envs/<env>.tfvars` (the IaC pipeline reads the committed git tree, and the VAPID public key + image digest are only known after earlier stages); approving each pipeline's ManualApproval gate (omit with `--auto-approve`); and re-pinning `container_image` after a backend deploy (step 4). Everything else is automated by `deploy.sh`.
 
 
 ### Step 1 — Apply the bootstrap layer
@@ -550,9 +582,18 @@ uv pip install --python .venv-iac/bin/python -r infrastructure/tests/requirement
 
 The plan-assertion suites (`test_bootstrap_plan.py`, `test_app_plan.py`) need AWS credentials and the `terraform` binary — the AWS provider resolves data sources at plan time — and skip with a clear message otherwise; their primary home is the IaC pipeline's test stage. The negative-validation suite (`test_negative_validation.py`) needs no credentials and never touches AWS.
 
+## Known limitations
+
+This is sample code. Before any use beyond a test account, review these defaults (details and fixes in [SECURITY.md](SECURITY.md)):
+
+- **CloudFront to ALB is plain HTTP.** The ALB accepts only requests that carry the CloudFront-injected `x-origin-verify` secret, but the hop itself is unencrypted. Use an HTTPS listener with an ACM certificate, or a CloudFront VPC origin with an internal ALB.
+- **Cognito MFA is optional.** Set `mfa_configuration = "ON"` on the user pool for anything beyond a test environment.
+- **An agent answer in progress is lost at stream rollover.** Bedrock caps a bidirectional stream at 8 minutes. The audio continues on the next segment, but an AWS DevOps Agent answer that arrives during the rollover is dropped (logged as `session.tool_result_dropped`). Ask the question again.
+- **The agent sees only associated accounts.** Answers describe whichever accounts are associated with the Agent Space (step 3b).
+
 ## Security posture
 
-- **Fail-closed guardrail**: `ApplyGuardrail` is evaluated before every DevOps Agent call; any intervention, non-VALID Automated Reasoning finding, error, timeout, or malformed response blocks the request and produces an audit log entry.
+- **Fail-closed gate**: a deterministic mutation-verb check runs first, then `ApplyGuardrail` (denied topic and content filters) is evaluated before every DevOps Agent call; any intervention, error, timeout, or malformed response blocks the request and produces an audit log entry. No Automated Reasoning policy is attached: Automated Reasoning checks validate model output, and a plain question submitted as input would not produce a VALID finding.
 - **Cognito JWT everywhere**: validated (signature, expiry, issuer, audience) at the WebSocket handshake before accept, and required on AppSync Events connects/subscribes. Unauthenticated connections are rejected before any processing.
 - **WAF in block mode at both scopes** (CLOUDFRONT + REGIONAL): CommonRuleSet + KnownBadInputsRuleSet, with WAF logging to persistent log groups.
 - **TLS-enforcing bucket policies**: every bucket created by either layer denies `aws:SecureTransport = false` and TLS < 1.2.

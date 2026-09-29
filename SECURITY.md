@@ -37,7 +37,7 @@ gitleaks is version-pinned (8.21.2) and always runs **first**, before any tool w
 
 The IaC grep gate enforces two deny rules: no 12-digit AWS-account-id-like values in any source file (`envs/` and `package-lock.json` excluded), and no hardcoded `us-east-1` in Terraform outside `variables.tf` and comments — the region is a variable.
 
-> **Note on ASH.** The `ash_output/` directory holds results from a manual [Automated Security Helper](https://github.com/awslabs/automated-security-helper) run. ASH is **not** wired into any pipeline stage; it is an out-of-band review artifact. The blocking gates are the ones tabulated above.
+> **Note on ASH.** You can run [Automated Security Helper](https://github.com/awslabs/automated-security-helper) (ASH) manually as an extra review; its `ash_output/` folder is gitignored and not shipped. ASH is **not** wired into any pipeline stage. The blocking gates are the ones tabulated above.
 
 ## Implemented controls
 
@@ -71,19 +71,20 @@ The DENY topic wording is verb-led with an explicit read-only exclusion, calibra
 
 ### Observability
 
-Four CloudWatch alarms (running task count, ALB unhealthy targets, voice 5XX rate, Notifier errors) publish to an ops SNS topic. WAF logs, ECS logs, and Notifier logs all honour a configurable retention period.
+Four CloudWatch alarms (running task count, ALB unhealthy targets, voice 5XX rate, Notifier errors) publish to an ops SNS topic. The ECS module adds two scaling alarms (active connections high and low) that drive target scaling and do not notify. WAF logs, ECS logs, and Notifier logs all honour a configurable retention period.
 
 ## Operator responsibilities
 
 The code cannot do these for you.
 
-1. **Attach the Automated Reasoning policy out-of-band.** The AWS Terraform provider (through the 6.x series) has no resource or argument for Automated Reasoning policies or their attachment, so `infrastructure/app/modules/bedrock_guardrail` cannot express it. `var.automated_reasoning_policy_arn` documents the pre-built policy; attach it with `aws bedrock update-guardrail --automated-reasoning-policy-config`. The DENY topic and the mutation guard enforce the destructive-operation block in the meantime.
+1. **Do not attach an Automated Reasoning policy to the gate guardrail.** Automated Reasoning checks validate model *output* against policy rules. The gate submits the engineer's question as *input*, which has no factual claims to validate, so it would not return a VALID finding and the fail-closed gate would block every question. The DENY topic, the content filters, and the mutation guard enforce the destructive-operation block. `var.automated_reasoning_policy_arn` remains for experiments and is unset by default.
 2. **Attach a custom ACM certificate if you need a real TLS 1.2 floor** — see the section below.
 3. **Never regenerate the VAPID key pair** once browsers have subscribed; a new pair invalidates every existing push subscription. All three provisioning paths are deliberately create-if-absent.
 4. **Provide a compliant S3 access-logging bucket.** The stack references it and never creates it, so its policy and retention are yours to own.
-5. **Enable Bedrock model access** to Nova 2 Sonic in `us-east-1`, and keep enrollment admin-create-only unless you have a reason to open it.
-6. **Rotate the origin-verify secret** with `terraform taint random_password.origin_verify` followed by an apply, which updates CloudFront, the ALB rule, and the SSM parameter together. Note that because Terraform generates this value, it is present in Terraform state — protect the state bucket accordingly.
-7. **Review IAM before production.** Roles are resource-scoped by design; re-verify them against your own least-privilege bar.
+5. **Confirm Amazon Nova 2 Sonic is invocable** in `us-east-1` (serverless models are available by default, so check that no IAM policy or SCP denies it), and keep enrollment admin-create-only unless you have a reason to open it.
+6. **Associate only the read-only role with the Agent Space**, and never configure the optional elevated role (`agentElevatedRoleArn`). See README step 3b.
+7. **Rotate the origin-verify secret** with `terraform taint random_password.origin_verify` followed by an apply, which updates CloudFront, the ALB rule, and the SSM parameter together. Note that because Terraform generates this value, it is present in Terraform state — protect the state bucket accordingly.
+8. **Review IAM before production.** Roles are resource-scoped by design; re-verify them against your own least-privilege bar.
 
 ## Use a custom ACM certificate for TLS enforcement
 
