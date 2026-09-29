@@ -397,6 +397,8 @@ scripts/deploy.sh create-user --project "$PROJECT" --environment "$ENVIRONMENT" 
 scripts/deploy.sh smoke --project "$PROJECT" --environment "$ENVIRONMENT"
 ```
 
+Run the gate evaluation set (51 labelled read and change prompts) against the deployed guardrail. See [evaluation/README.md](evaluation/README.md) for the command and the reference results.
+
 Print the portal URL to open it:
 
 ```bash
