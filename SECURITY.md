@@ -29,13 +29,13 @@ Each of the three pipelines runs a **SecurityScan** stage before its UnitTest, B
 
 | Pipeline | Gates (all blocking) |
 |---|---|
-| Backend (`ci/backend/scan.yml`) | `gitleaks detect --no-git --redact`; `bandit -ll -r backend/` (fails on MEDIUM+); `pip-audit` over the resolved runtime dependency set of **both** `backend/voice_service` and `backend/notifier` (any known advisory fails — OSV advisories are not uniformly scored, so no severity filter is applied) |
+| Backend (`ci/backend/scan.yml`) | `gitleaks detect --no-git --redact`; `bandit -ll -r backend/` (fails on MEDIUM+); `pip-audit` over the resolved runtime dependency set of **both** `backend/voice_service` and `backend/notifier` (any known advisory fails: OSV advisories are not uniformly scored, so no severity filter is applied) |
 | Frontend (`ci/frontend/scan.yml`) | `gitleaks`; `npm audit --audit-level=high`; `npx eslint .` |
 | IaC (`ci/iac/scan.yml`) | `gitleaks`; `checkov --directory infrastructure --hard-fail-on HIGH --hard-fail-on CRITICAL`; a hardcoded-value grep gate |
 
 gitleaks is version-pinned (8.21.2) and always runs **first**, before any tool writes into the source tree, with `--redact` so candidate values never reach build logs. Documented false positives are allowlisted in `.gitleaks.toml`; no real credential is suppressed.
 
-The IaC grep gate enforces two deny rules: no 12-digit AWS-account-id-like values in any source file (`envs/` and `package-lock.json` excluded), and no hardcoded `us-east-1` in Terraform outside `variables.tf` and comments — the region is a variable.
+The IaC grep gate enforces two deny rules: no 12-digit AWS-account-id-like values in any source file (`envs/` and `package-lock.json` excluded), and no hardcoded `us-east-1` in Terraform outside `variables.tf` and comments: the region is a variable.
 
 > **Note on ASH.** You can run [Automated Security Helper](https://github.com/awslabs/automated-security-helper) (ASH) manually as an extra review; its `ash_output/` folder is gitignored and not shipped. ASH is **not** wired into any pipeline stage. The blocking gates are the ones tabulated above.
 
@@ -43,9 +43,9 @@ The IaC grep gate enforces two deny rules: no 12-digit AWS-account-id-like value
 
 ### Edge and network
 
-- **Two WAF web ACLs** (`infrastructure/app/modules/waf`) — one at `CLOUDFRONT` scope on the distribution, one at `REGIONAL` scope attached to the ALB. Both carry a rate-limit rule plus `AWSManagedRulesCommonRuleSet` and `AWSManagedRulesKnownBadInputsRuleSet` in **block** mode (`override_action { none }`), with logging to CloudWatch Logs and redacted fields.
+- **Two WAF web ACLs** (`infrastructure/app/modules/waf`): one at `CLOUDFRONT` scope on the distribution, one at `REGIONAL` scope attached to the ALB. Both carry a rate-limit rule plus `AWSManagedRulesCommonRuleSet` and `AWSManagedRulesKnownBadInputsRuleSet` in **block** mode (`override_action { none }`), with logging to CloudWatch Logs and redacted fields.
 - **S3 is reachable only through CloudFront** via Origin Access Control; the frontend bucket blocks all public access, is encrypted (AES256, or KMS when `kms_key_arn` is set), and is versioned.
-- **Bucket policies deny insecure transport** — `aws:SecureTransport = false` and `s3:TlsVersion < 1.2` are both denied (`infrastructure/app/modules/s3_policies`).
+- **Bucket policies deny insecure transport**: `aws:SecureTransport = false` and `s3:TlsVersion < 1.2` are both denied (`infrastructure/app/modules/s3_policies`).
 - **CloudFront redirects all viewers to HTTPS** (`viewer_protocol_policy = "redirect-to-https"`). See the TLS caveat below.
 - **Direct-to-ALB traffic is rejected.** CloudFront injects a 32-character origin-verify header; the ALB listener rule forwards only requests carrying it, and everything else gets a fixed-response. The ALB additionally sets `drop_invalid_header_fields = true`, enables deletion protection, and writes access logs to the operator-supplied bucket.
 
@@ -60,14 +60,14 @@ The IaC grep gate enforces two deny rules: no 12-digit AWS-account-id-like value
 - **ECR**: `scan_on_push = true`, immutable tags by default, and server-side encryption (AES256 or KMS).
 - **Secrets never live in source.** The VAPID private key and the origin-verify value are SSM SecureStrings; only their *parameter names* appear in source and tfvars. The backend wraps sensitive config in a `Secret` type whose `str`/`repr` renders `Secret(<key>)`, so values cannot be logged accidentally.
 
-### AI safety — the fail-closed guardrail
+### AI safety: the fail-closed guardrail
 
 This is the headline control. Every `ask_devops_agent` tool call is gated before it can reach the DevOps Agent, by **two independent layers**:
 
 1. **A deterministic mutation guard** (`backend/voice_service/app/domain/mutation_guard.py`) blocks mutating requests before the guardrail is even consulted. Bedrock topic matching is probabilistic, so this layer catches imperative mutations that the topic classifier lets through.
-2. **The Bedrock Guardrail** (`infrastructure/app/modules/bedrock_guardrail`) carries a `destructive-operations` DENY topic plus content filters for harmful content and prompt attacks. The decision function (`backend/voice_service/app/domain/guardrail_policy.py`) **BLOCKs on any non-`VALID` finding, on `GUARDRAIL_INTERVENED`, and on any evaluation error** — a guardrail that cannot be reached is a guardrail that blocks.
+2. **The Bedrock Guardrail** (`infrastructure/app/modules/bedrock_guardrail`) carries a `destructive-operations` DENY topic plus content filters for harmful content and prompt attacks. The decision function (`backend/voice_service/app/domain/guardrail_policy.py`) **BLOCKs on any non-`VALID` finding, on `GUARDRAIL_INTERVENED`, and on any evaluation error**: a guardrail that cannot be reached is a guardrail that blocks.
 
-The DENY topic wording is verb-led with an explicit read-only exclusion, calibrated against a 22-phrase probe matrix. Noun-led wording caused read questions about EC2 to be refused while `Create an IAM role with administrator access` passed — the exact false-negative class a read-only portal can least afford. Do not "simplify" that definition without re-running the probe matrix.
+The DENY topic wording is verb-led with an explicit read-only exclusion, calibrated against a 22-phrase probe matrix. Noun-led wording caused read questions about EC2 to be refused while `Create an IAM role with administrator access` passed: the exact false-negative class a read-only portal can least afford. Do not "simplify" that definition without re-running the probe matrix.
 
 ### Observability
 
@@ -78,19 +78,19 @@ Four CloudWatch alarms (running task count, ALB unhealthy targets, voice 5XX rat
 The code cannot do these for you.
 
 1. **Do not attach an Automated Reasoning policy to the gate guardrail.** Automated Reasoning checks validate model *output* against policy rules. The gate submits the engineer's question as *input*, which has no factual claims to validate, so it would not return a VALID finding and the fail-closed gate would block every question. The DENY topic, the content filters, and the mutation guard enforce the destructive-operation block. `var.automated_reasoning_policy_arn` remains for experiments and is unset by default.
-2. **Attach a custom ACM certificate if you need a real TLS 1.2 floor** — see the section below.
+2. **Attach a custom ACM certificate if you need a real TLS 1.2 floor**: see the section below.
 3. **Never regenerate the VAPID key pair** once browsers have subscribed; a new pair invalidates every existing push subscription. All three provisioning paths are deliberately create-if-absent.
 4. **Provide a compliant S3 access-logging bucket.** The stack references it and never creates it, so its policy and retention are yours to own.
 5. **Confirm Amazon Nova 2 Sonic is invocable** in `us-east-1` (serverless models are available by default, so check that no IAM policy or SCP denies it), and keep enrollment admin-create-only unless you have a reason to open it.
 6. **Associate only the read-only role with the Agent Space**, and never configure the optional elevated role (`agentElevatedRoleArn`). See README step 3b.
-7. **Rotate the origin-verify secret** with `terraform taint random_password.origin_verify` followed by an apply, which updates CloudFront, the ALB rule, and the SSM parameter together. Note that because Terraform generates this value, it is present in Terraform state — protect the state bucket accordingly.
+7. **Rotate the origin-verify secret** with `terraform taint random_password.origin_verify` followed by an apply, which updates CloudFront, the ALB rule, and the SSM parameter together. Note that because Terraform generates this value, it is present in Terraform state: protect the state bucket accordingly.
 8. **Review IAM before production.** Roles are resource-scoped by design; re-verify them against your own least-privilege bar.
 
 ## Use a custom ACM certificate for TLS enforcement
 
 `infrastructure/app/modules/cloudfront_s3/main.tf` sets `minimum_protocol_version = "TLSv1.2_2021"`, but it also sets `cloudfront_default_certificate = true`. **That security policy only takes effect when a custom ACM certificate is attached.** On the default `*.cloudfront.net` domain, CloudFront ignores the setting and permits older TLS versions (TLSv1.0/1.1), which have known weaknesses.
 
-This Terraform does not currently expose a custom domain or certificate — there are no `aliases` or `acm_certificate_arn` variables — so enabling one is a **code change**, not a configuration value:
+This Terraform does not currently expose a custom domain or certificate (there are no `aliases` or `acm_certificate_arn` variables), so enabling one is a **code change**, not a configuration value:
 
 1. **Request or import a certificate** in ACM. It must be in `us-east-1` for CloudFront:
    ```bash
@@ -122,16 +122,16 @@ This Terraform does not currently expose a custom domain or certificate — ther
 Read [SECURITY_EXCEPTIONS.md](SECURITY_EXCEPTIONS.md) for the full analysis. In summary:
 
 - **One accepted container CVE**: CVE-2026-85091 in zlib. No Debian suite carries a fix, `libz` cannot be removed (CPython links it), and the vulnerable `gzFile` API is not reachable from this service. Re-check before each release; it closes with a rebuild once Debian ships a fix.
-- **The backend pipeline does not scan the image it builds.** gitleaks, bandit, and pip-audit inspect source and Python dependencies, not the built image's OS packages — which is why a High in `perl-base` was found post-deploy by Inspector rather than at build time. Adding grype or trivy with `--only-fixed` against the pushed image would close this; it needs an allowlist for the zlib exception above, which is High and unfixable.
+- **The backend pipeline does not scan the image it builds.** gitleaks, bandit, and pip-audit inspect source and Python dependencies, not the built image's OS packages, which is why a High in `perl-base` was found post-deploy by Inspector rather than at build time. Adding grype or trivy with `--only-fixed` against the pushed image would close this; it needs an allowlist for the zlib exception above, which is High and unfixable.
 - **No CloudFront response headers policy.** There is currently no managed or custom response-headers policy on the distribution, so CSP, HSTS, `X-Frame-Options`, and `Referrer-Policy` are not set at the edge. Adding one is a straightforward hardening step for production use.
 
 ## General practices for this codebase
 
-1. **Never commit credentials** — use SSM Parameter Store or Secrets Manager and reference parameters by name.
-2. **Keep secrets out of `config.json`** — it is generated at deploy time from Terraform outputs and served to browsers. Only non-sensitive values (the VAPID *public* key, endpoints, Cognito ids) belong there.
-3. **Keep dependencies current** — `pip-audit`, `npm audit`, and the Dockerfile's `apt-get upgrade` in both stages are what keep advisory counts down.
+1. **Never commit credentials**: use SSM Parameter Store or Secrets Manager and reference parameters by name.
+2. **Keep secrets out of `config.json`**: it is generated at deploy time from Terraform outputs and served to browsers. Only non-sensitive values (the VAPID *public* key, endpoints, Cognito ids) belong there.
+3. **Keep dependencies current**: `pip-audit`, `npm audit`, and the Dockerfile's `apt-get upgrade` in both stages are what keep advisory counts down.
 4. **Act on scan findings rather than suppressing them.** If a suppression is genuinely necessary, document it in `.gitleaks.toml` or `SECURITY_EXCEPTIONS.md` with the reasoning, as the existing entries do.
-5. **Run the smoke checks after deploying** (`scripts/smoke/run-all.sh`) — they verify that the guardrail blocks destructive requests, that direct-to-ALB access is rejected, that AppSync requires auth, and that WAF blocks known-bad input.
+5. **Run the smoke checks after deploying** (`scripts/smoke/run-all.sh`): they verify that the guardrail blocks destructive requests, that direct-to-ALB access is rejected, that AppSync requires auth, and that WAF blocks known-bad input.
 
 ## Preferred Languages
 

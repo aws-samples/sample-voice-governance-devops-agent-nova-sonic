@@ -16,7 +16,7 @@ For bug reports, include:
 
 ## Before You Start
 
-Read [Writing the Change](#writing-the-change) below before your first contribution. The conventions there are enforced by the build, not merely advisory — a change that ignores them fails the pipeline rather than reaching review.
+Read [Writing the Change](#writing-the-change) below before your first contribution. The conventions there are enforced by the build, not merely advisory: a change that ignores them fails the pipeline rather than reaching review.
 
 For anything beyond a small fix, open an issue describing your intended change first. This avoids duplicate work and gives maintainers a chance to comment on the approach early.
 
@@ -41,7 +41,7 @@ No AWS credentials are needed to run the test suites. Backend tests run entirely
 git clone <repository-url> nova-sonic-support-portal
 cd nova-sonic-support-portal
 
-# Backend — one environment per package
+# Backend: one environment per package
 cd backend/voice_service && uv venv --python 3.14 .venv && uv pip install --python .venv/bin/python ".[dev]" && cd -
 cd backend/notifier      && uv venv --python 3.14 .venv && uv pip install --python .venv/bin/python ".[dev]" && cd -
 
@@ -78,8 +78,8 @@ What each gate enforces:
 
 - **ruff** with rule groups `D` (pydocstyle, Google convention), `ASYNC`, `BLE` (no blind `except`), `TRY` (exception hygiene).
 - **mypy `--strict`**. Only untyped third-party SDK surfaces carry targeted `ignore_missing_imports` overrides; application code stays fully strict.
-- **interrogate `--fail-under=100`** — every module, class, method, and function needs a docstring covering purpose, each parameter by name, the return value, and each exception raised.
-- **import-linter** — AWS SDK imports are confined to `adapters/`. Two contracts apply to the voice service: `domain`, `ports`, `orchestration`, `auth`, `config`, `protocol`, and `exceptions` may not import any SDK, and `app.main` (the composition root) may not import one *directly* even though it wires the adapters that do. For the notifier, `src.normalizer` stays SDK-free.
+- **interrogate `--fail-under=100`**: every module, class, method, and function needs a docstring covering purpose, each parameter by name, the return value, and each exception raised.
+- **import-linter**: AWS SDK imports are confined to `adapters/`. Two contracts apply to the voice service: `domain`, `ports`, `orchestration`, `auth`, `config`, `protocol`, and `exceptions` may not import any SDK, and `app.main` (the composition root) may not import one *directly* even though it wires the adapters that do. For the notifier, `src.normalizer` stays SDK-free.
 - **pytest** with `pytest-asyncio` in auto mode.
 
 ### Frontend
@@ -87,7 +87,7 @@ What each gate enforces:
 ```bash
 cd frontend
 npx eslint .          # or: npm run lint
-npx vitest --run      # or: npm test  — always non-interactive
+npx vitest --run      # or: npm test, always non-interactive
 ```
 
 ### Infrastructure
@@ -124,7 +124,7 @@ Two additional IaC gates are plain greps that fail the build (see `ci/iac/scan.y
 - **Ports and adapters.** `domain/` is pure logic with no I/O and no SDK imports. `ports/` holds the abstract interfaces. `adapters/` is the only place `boto3`, `aioboto3`, or `botocore` may be imported.
 - **All backend I/O is async.** Never call blocking synchronous I/O on an async path; isolate blocking libraries behind an adapter using `aioboto3`, `httpx`, or `asyncio.to_thread`.
 - **Specific exceptions only**, from the `PortalError` hierarchy in `backend/shared/exceptions.py` and `backend/voice_service/app/exceptions.py`. Never raise or catch bare `Exception` outside a top-level boundary handler (WebSocket connection handler, FastAPI middleware, Lambda entrypoint).
-- **Retries go through `backend/shared/retry.py`** — bounded at 3 retries with exponential backoff and jitter, a log line per failure, and a distinct exhaustion record.
+- **Retries go through `backend/shared/retry.py`**: bounded at 3 retries with exponential backoff and jitter, a log line per failure, and a distinct exhaustion record.
 - **Structured JSON logging only**, and every entry produced while handling a voice session carries the session id. Use the session-scoped logger.
 - **JSDoc on every frontend function**: purpose, each `@param` by name, `@returns`, and `@throws` per error type.
 - **No hardcoded environment values.** No account ids, endpoints, `wss://` URLs, Cognito ids, or VAPID keys in source. Frontend values load at runtime from `config.json`, generated at deploy time from Terraform outputs and never committed. Backend secrets come from SSM and are wrapped in the `Secret` type.
@@ -134,7 +134,7 @@ Two additional IaC gates are plain greps that fail the build (see `ci/iac/scan.y
 
 Add tests for behaviour you change. This repo leans on property-based testing alongside unit tests:
 
-- **Backend**: `hypothesis` with `settings(max_examples=100)` or more, under `tests/property/`, tagged `# Feature: nova-sonic-support-portal, Property N: <name>`. Tests run against the in-memory fakes in `backend/voice_service/tests/fakes.py` — no AWS access and no mocking of SDK internals.
+- **Backend**: `hypothesis` with `settings(max_examples=100)` or more, under `tests/property/`, tagged `# Feature: nova-sonic-support-portal, Property N: <name>`. Tests run against the in-memory fakes in `backend/voice_service/tests/fakes.py`: no AWS access and no mocking of SDK internals.
 - **Frontend**: `fast-check` with `{ numRuns: 100 }` or more, under `frontend/tests/property/`, tagged `// Feature: nova-sonic-support-portal, Property N: <name>`.
 - **Infrastructure**: plan assertions under `infrastructure/tests/`, which check security defaults against `terraform show -json`.
 
@@ -157,7 +157,7 @@ Closes #42
 
 Rules:
 
-- Format: `type(scope): Subject` — capitalized subject, imperative mood ("Add", not "Added" or "Adds"), no trailing period, 50 characters or fewer.
+- Format: `type(scope): Subject`: capitalized subject, imperative mood ("Add", not "Added" or "Adds"), no trailing period, 50 characters or fewer.
 - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`.
 - Scopes used in this repo: `voice_service`, `notifier`, `frontend`, `infrastructure`, `security`, `agent`, `ci`, `docs`.
 - Body: explain what and why, not how. Wrap at 72 characters.
@@ -167,7 +167,7 @@ Rules:
 
 1. Branch off `main`.
 2. Make the change and run the relevant gates above.
-3. Open a code review against `main`. Keep the title and description accurate — they become the squash commit message.
+3. Open a code review against `main`. Keep the title and description accurate: they become the squash commit message.
 4. Iterate on feedback by pushing new commits to the same branch rather than rewriting pushed history.
 
 One logical change per review. A feature plus its documentation is fine together; unrelated changes belong in separate reviews.
@@ -183,10 +183,10 @@ One logical change per review. A feature plus its documentation is fine together
 
 ### Changes that need extra care
 
-- **Deployment flow or buildspecs** (`ci/**`, `scripts/deploy.sh`) — the deploy path is idempotent by design. Preserve that: re-running any stage must converge rather than create duplicate or orphaned resources.
-- **`container_image` in `infrastructure/app/envs/<env>.tfvars`** — after a backend deploy this must be re-pinned to the deployed image URI, or the next IaC apply rolls ECS back. See the README's Step 2 catch-up contract.
-- **Guardrail and mutation-guard logic** — the fail-closed gate is the portal's core safety property. Any change here should come with tests proving that ambiguity, errors, and `GUARDRAIL_INTERVENED` all still resolve to BLOCK.
-- **Dependency bumps** — run `pip-audit` or `npm audit --audit-level=high` locally; the pipeline will block on advisories.
+- **Deployment flow or buildspecs** (`ci/**`, `scripts/deploy.sh`): the deploy path is idempotent by design. Preserve that: re-running any stage must converge rather than create duplicate or orphaned resources.
+- **`container_image` in `infrastructure/app/envs/<env>.tfvars`**: after a backend deploy this must be re-pinned to the deployed image URI, or the next IaC apply rolls ECS back. See the README's Step 2 catch-up contract.
+- **Guardrail and mutation-guard logic**: the fail-closed gate is the portal's core safety property. Any change here should come with tests proving that ambiguity, errors, and `GUARDRAIL_INTERVENED` all still resolve to BLOCK.
+- **Dependency bumps**: run `pip-audit` or `npm audit --audit-level=high` locally; the pipeline will block on advisories.
 
 ## Repository Structure
 

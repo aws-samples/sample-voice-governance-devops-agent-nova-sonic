@@ -1,7 +1,5 @@
 # Nova Sonic Support Portal
 
-> **Sample code notice:** This project is sample code for demonstration and educational purposes only. It is not intended for production use without additional security review and hardening. See [SECURITY.md](SECURITY.md) for production hardening recommendations.
-
 A voice-driven AWS support portal for DevOps engineers. An engineer speaks into the browser; Amazon Nova 2 Sonic (Bedrock speech-to-speech, us-east-1) transcribes and converses over a bidirectional stream, forwarding diagnostic questions as text to the AWS DevOps Agent through a Nova Sonic tool named `ask_devops_agent`. Every tool call is gated **fail-closed** (any error counts as a block) by a deterministic mutation-verb check followed by an Amazon Bedrock Guardrail with a denied topic and content filters: only requests classified as read/diagnostic operations ever reach the agent. The agent then reads the account through a read-only IAM role that you associate with the Agent Space. The agent's streamed answer is spoken back to the engineer.
 
 The portal also pushes incident notifications: EventBridge events (CloudWatch Alarms, Incident Manager, DevOps Agent findings) drive a Notifier Lambda that fans out to an AppSync Events channel (in-app popup + chime) and to Web Push subscriptions (browser closed), with optional SNS escalation. Voice sessions survive Bedrock's 8-minute stream cap through session segmentation with context replay, and survive disconnects through reconnect with transcript restore from DynamoDB.
@@ -116,9 +114,9 @@ Each pipeline runs **Source → SecurityScan → UnitTest → BuildAndPlan → M
 
 ### VAPID key pair (Web Push)
 
-The Notifier signs Web Push messages with a VAPID (RFC 8292) ECDSA P-256 key pair. The **private key** is stored as an SSM SecureString and referenced by name only (`vapid_private_key_parameter_name`) — it never appears in source or Terraform state. The **public key** (`vapid_public_key`) is not sensitive and is published to browsers via `config.json`. The key must exist **before the first app-layer deploy**, and — critically — **must never be regenerated once browsers have subscribed**: a new key pair invalidates every existing push subscription. All three options below are therefore strictly *create-if-absent*.
+The Notifier signs Web Push messages with a VAPID (RFC 8292) ECDSA P-256 key pair. The **private key** is stored as an SSM SecureString and referenced by name only (`vapid_private_key_parameter_name`), so it never appears in source or Terraform state. The **public key** (`vapid_public_key`) is not sensitive and is published to browsers via `config.json`. The key must exist **before the first app-layer deploy**, and, critically, **must never be regenerated once browsers have subscribed**: a new key pair invalidates every existing push subscription. All three options below are therefore strictly *create-if-absent*.
 
-**Option A — Terraform-native (recommended).** The bootstrap layer's `vapid` module generates the pair if absent, stores the private key as an SSM SecureString, and exports the public key — all inside `terraform apply`, with no key material in Terraform state (an `external` data source returns only the public key). Enable it with `create_vapid_key=true`, or via the orchestrator:
+**Option A, Terraform-native (recommended).** The bootstrap layer's `vapid` module generates the pair if absent, stores the private key as an SSM SecureString, and exports the public key. It all runs inside `terraform apply`, with no key material in Terraform state (an `external` data source returns only the public key). Enable it with `create_vapid_key=true`, or via the orchestrator:
 
 ```bash
 scripts/deploy.sh bootstrap --project <project> --environment <env> \
@@ -143,14 +141,14 @@ terraform output -raw vapid_public_key
 terraform output -raw vapid_private_key_parameter_name
 ```
 
-**Option B — standalone subcommand (key managed outside Terraform).** `scripts/deploy.sh vapid` generates the pair (if absent) with `openssl`, stores the private key as a SecureString, and prints the public key — without touching Terraform state at all:
+**Option B, standalone subcommand (key managed outside Terraform).** `scripts/deploy.sh vapid` generates the pair (if absent) with `openssl`, stores the private key as a SecureString, and prints the public key, without touching Terraform state at all:
 
 ```bash
 scripts/deploy.sh vapid --project <project> --environment <env> \
   --vapid-subject "mailto:ops@example.com"
 ```
 
-**Option C — fully manual.** Generate and store the key yourself:
+**Option C: fully manual.** Generate and store the key yourself:
 
 ```bash
 npx web-push generate-vapid-keys
@@ -167,9 +165,9 @@ With every option, the parameter **name** goes into the tfvars (`vapid_private_k
 
 Deployment order: bootstrap layer (local `terraform apply`) → IaC pipeline (applies the app layer) → backend pipeline (image → ECR → ECS) → bootstrap re-apply (two-phase frontend wiring) → frontend pipeline (sync → invalidation) → smoke tests.
 
-### Quick Start — `scripts/deploy.sh`
+### Quick Start: `scripts/deploy.sh`
 
-`scripts/deploy.sh` orchestrates the entire flow below (or any single stage) from one entry point. It is a thin, **idempotent** wrapper over the tooling this repo already ships — `terraform` for the bootstrap layer, `scripts/push-source.sh` to trigger pipelines, `aws codepipeline` to poll runs and clear the manual-approval gate, and `scripts/smoke/run-all.sh` for the post-deploy checks. It performs no destructive operations.
+`scripts/deploy.sh` orchestrates the entire flow below (or any single stage) from one entry point. It is a thin, **idempotent** wrapper over the tooling this repo already ships: `terraform` for the bootstrap layer, `scripts/push-source.sh` to trigger pipelines, `aws codepipeline` to poll runs and clear the manual-approval gate, and `scripts/smoke/run-all.sh` for the post-deploy checks. It performs no destructive operations.
 
 The portal is **pipeline-driven**: only the bootstrap layer is applied locally; the app layer, container image, and frontend bundle are each deployed by their CodePipeline through the `Source → SecurityScan → UnitTest → BuildAndPlan → ManualApproval → Deploy` stages. For each pipeline the script pushes source, waits for the run to reach `ManualApproval`, and then either pauses for you to approve after reviewing the `BuildAndPlan` output in the console, or approves automatically with `--auto-approve`.
 
@@ -186,7 +184,7 @@ scripts/deploy.sh all --project <project> --environment <env> --auto-approve
 PROJECT=<project> ENVIRONMENT=<env> AWS_REGION=us-east-1 scripts/deploy.sh all
 ```
 
-Per-target subcommands — run any stage in isolation (each maps to the numbered steps below):
+Per-target subcommands: run any stage in isolation (each maps to the numbered steps below):
 
 | Command | Does | Step |
 |---|---|---|
@@ -198,7 +196,7 @@ Per-target subcommands — run any stage in isolation (each maps to the numbered
 | `frontend` | Push the frontend source; drive the frontend pipeline (sync → invalidation) | 6 |
 | `create-user` | Create a Cognito engineer account (guarded; skips if it exists) | 6 note |
 | `smoke` | Run the read-only post-deploy smoke checks | 7 |
-| `outputs` | Fetch and print the app layer's exported Terraform outputs | — |
+| `outputs` | Fetch and print the app layer's exported Terraform outputs | None |
 
 ```bash
 scripts/deploy.sh backend --project <project> --environment <env>
@@ -206,13 +204,13 @@ scripts/deploy.sh create-user --project <project> --environment <env> --username
 scripts/deploy.sh smoke --project <project> --environment <env>
 ```
 
-Useful options: `--auto-approve` (clear approval gates unattended), `--no-wait` (push source and return without polling — single stages only, not `all`), `--timeout <seconds>` (per-pipeline wait, default 3600), `--username`/`--temp-password` (for `create-user`; the password is read without echo when omitted), `--outputs-json <file>` (reuse a saved outputs capture for `smoke`). Run `scripts/deploy.sh --help` for the full reference.
+Useful options: `--auto-approve` (clear approval gates unattended), `--no-wait` (push source and return without polling: single stages only, not `all`), `--timeout <seconds>` (per-pipeline wait, default 3600), `--username`/`--temp-password` (for `create-user`; the password is read without echo when omitted), `--outputs-json <file>` (reuse a saved outputs capture for `smoke`). Run `scripts/deploy.sh --help` for the full reference.
 
 **Idempotency.** Re-running the whole script, or any subcommand, converges on the same deployed state and never creates duplicate or orphaned resources: `bootstrap`/`wire-frontend` reconcile against Terraform state (a no-op when nothing drifts); `infra`/`backend`/`frontend` re-push source, and Terraform state, ECS task-definition comparison, and `aws s3 sync --delete` keep re-runs convergent; `create-user` is guarded by an existence check and never overwrites a password. After a `backend` deploy, keep `container_image` in `envs/<env>.tfvars` in step with the deployed image URI (the [Step 2](#step-2--prepare-the-app-layer-tfvars) catch-up contract) so the next `infra` run does not roll the service back.
 
-The manual walkthrough below documents exactly what each subcommand does under the hood — read it to understand the contracts, or when driving a stage by hand.
+The manual walkthrough below documents exactly what each subcommand does under the hood: read it to understand the contracts, or when driving a stage by hand.
 
-### Operator runbook — follow these steps in order
+### Operator runbook: follow these steps in order
 
 This is the complete, copy-paste sequence for a **first-time deployment**. Do the steps in order; each says exactly what to run and how to obtain every value. Replace `<project>`, `<env>` (for example `dev`), and the placeholders as you go. Everything runs from the repository root unless stated otherwise, and the region is `us-east-1` throughout (the design is pinned to it).
 
@@ -228,7 +226,7 @@ export AWS_REGION=us-east-1
 
 These live outside the repo. `deploy.sh` checks your credentials but cannot provision an AWS account's entitlements for you.
 
-**0a. AWS credentials** — confirm you are authenticated to the target account:
+**0a. AWS credentials**: confirm you are authenticated to the target account:
 
 ```bash
 aws sts get-caller-identity
@@ -316,7 +314,7 @@ git commit -m "chore: add ${ENVIRONMENT} app-layer tfvars"
 scripts/deploy.sh infra --project "$PROJECT" --environment "$ENVIRONMENT"
 ```
 
-The script pushes the source, waits for the pipeline, and pauses at the **ManualApproval** gate: review the `BuildAndPlan` output in the CodePipeline console, then answer the prompt to approve. Add `--auto-approve` to skip the prompt and approve automatically once `BuildAndPlan` succeeds. (The ECS service will show 0 running tasks until step 4 — expected.)
+The script pushes the source, waits for the pipeline, and pauses at the **ManualApproval** gate: review the `BuildAndPlan` output in the CodePipeline console, then answer the prompt to approve. Add `--auto-approve` to skip the prompt and approve automatically once `BuildAndPlan` succeeds. (The ECS service will show 0 running tasks until step 4, which is expected.)
 
 #### 3b. Associate this account with the Agent Space (required)
 
@@ -405,7 +403,7 @@ Print the portal URL to open it:
 scripts/deploy.sh outputs --project "$PROJECT" --environment "$ENVIRONMENT" | jq -r '.portal_url.value'
 ```
 
-#### After the first deploy — steady state is one command
+#### After the first deploy: steady state is one command
 
 Once `envs/<env>.tfvars` carries real values (VAPID + the deployed `container_image`), the whole flow is idempotent and hands-off. To ship subsequent changes or re-converge everything:
 
@@ -413,12 +411,12 @@ Once `envs/<env>.tfvars` carries real values (VAPID + the deployed `container_im
 scripts/deploy.sh all --project "$PROJECT" --environment "$ENVIRONMENT" --auto-approve
 ```
 
-Or run just the stage you changed — `infra`, `backend`, or `frontend`. Re-running any stage (or `all`) never creates duplicate or orphaned resources.
+Or run just the stage you changed: `infra`, `backend`, or `frontend`. Re-running any stage (or `all`) never creates duplicate or orphaned resources.
 
 **What still needs a human, and why:** confirming Bedrock model availability and providing the access-logging bucket (account entitlements, step 0); associating the account with the Agent Space (step 3b, no Terraform resource exists); committing `envs/<env>.tfvars` (the IaC pipeline reads the committed git tree, and the VAPID public key + image digest are only known after earlier stages); approving each pipeline's ManualApproval gate (omit with `--auto-approve`); and re-pinning `container_image` after a backend deploy (step 4). Everything else is automated by `deploy.sh`.
 
 
-### Step 1 — Apply the bootstrap layer
+### Step 1: Apply the bootstrap layer
 
 ```bash
 cd infrastructure/bootstrap
@@ -433,14 +431,14 @@ The bootstrap layer keeps its own local state (it creates the remote backend the
 
 To also generate and store the VAPID key in the same apply, add `-var "create_vapid_key=true" -var 'vapid_subject=mailto:ops@example.com'` (see the [VAPID key](#vapid-key-pair-web-push) section) and copy the `vapid_public_key` / `vapid_private_key_parameter_name` outputs into the app tfvars.
 
-**Success looks like:** `Apply complete` followed by the outputs `source_bucket_names` (frontend/backend/iac), `pipeline_names`, `ecr_repository_url`, `artifact_bucket_name`, `state_bucket_name`, `lock_table_name`, and `source_object_key` (`source.zip`) — plus `vapid_public_key` and `vapid_private_key_parameter_name` when `create_vapid_key=true`. The three pipelines exist in the CodePipeline console (their first automatic run fails at Source until a source archive is uploaded — expected).
+**Success looks like:** `Apply complete` followed by the outputs `source_bucket_names` (frontend/backend/iac), `pipeline_names`, `ecr_repository_url`, `artifact_bucket_name`, `state_bucket_name`, `lock_table_name`, and `source_object_key` (`source.zip`), plus `vapid_public_key` and `vapid_private_key_parameter_name` when `create_vapid_key=true`. The three pipelines exist in the CodePipeline console (their first automatic run fails at Source until a source archive is uploaded, which is expected).
 
-### Step 2 — Prepare the app-layer tfvars
+### Step 2: Prepare the app-layer tfvars
 
 The IaC pipeline plans `infrastructure/app` using exactly one variable file committed at `infrastructure/app/envs/<env>.tfvars` inside the iac source archive (contract in `ci/iac/build.yml`; the stage fails if several `envs/*.tfvars` are present). Create it with every required app variable:
 
 ```hcl
-# infrastructure/app/envs/<env>.tfvars — non-secret values only
+# infrastructure/app/envs/<env>.tfvars: non-secret values only
 environment                      = "<env>"
 access_logging_bucket_name       = "<pre-existing-logs-bucket>"
 container_image                  = "<ecr_repository_url>:bootstrap-placeholder"
@@ -454,12 +452,12 @@ vapid_public_key                 = "<vapid-public-key>"
 Notes on the contract (see `ci/iac/build.yml` and `ci/backend/deploy.yml`):
 
 - `lambda_zip_path` is **always injected by the pipeline** (it packages the Notifier zip itself); a tfvars value for it is overridden.
-- `container_image`: Terraform owns the ECS task definition, and the ECR repository is immutable-tagged. On the first apply no image exists yet, so use a placeholder tag — the apply succeeds, but voice tasks cannot start until Step 4 deploys a real image. After every backend-pipeline deploy, update this value to the image URI the pipeline deployed (printed in its Deploy logs), otherwise the **next** IaC apply rolls the service back to the stale tfvars image.
+- `container_image`: Terraform owns the ECS task definition, and the ECR repository is immutable-tagged. On the first apply no image exists yet, so use a placeholder tag. The apply succeeds, but voice tasks cannot start until Step 4 deploys a real image. After every backend-pipeline deploy, update this value to the image URI the pipeline deployed (printed in its Deploy logs), otherwise the **next** IaC apply rolls the service back to the stale tfvars image.
 - Optional tuning variables (scaling thresholds, retention days, `create_escalation_topic`, `alarm_email_subscriptions`, ...) are documented in `infrastructure/app/variables.tf`.
 
-### Step 3 — Push the iac source (applies the app layer)
+### Step 3: Push the iac source (applies the app layer)
 
-`scripts/push-source.sh` archives the repository (committed tree via `git archive HEAD` in a git work tree — commit the tfvars first — or a filtered `zip` of the working tree otherwise) and uploads it as `source.zip`, which auto-starts the matching pipeline:
+`scripts/push-source.sh` archives the repository (committed tree via `git archive HEAD` in a git work tree (commit the tfvars first), or a filtered `zip` of the working tree otherwise) and uploads it as `source.zip`, which auto-starts the matching pipeline:
 
 ```bash
 scripts/push-source.sh iac <iac-source-bucket>
@@ -467,9 +465,9 @@ scripts/push-source.sh iac <iac-source-bucket>
 
 The pipeline runs Source → SecurityScan (gitleaks, checkov, hardcoded-value grep gate) → UnitTest (`terraform fmt -check`, `validate` on both layers, plan-assertion suite) → BuildAndPlan (`terraform plan -out=tfplan`). Review the plan in the BuildAndPlan logs, then **approve the ManualApproval stage in the CodePipeline console**. The Deploy stage applies the exact reviewed plan.
 
-**Success looks like:** the Deploy stage log ends with `App layer applied; outputs exported to s3://<state-bucket>/app-outputs/latest.json`, and that object exists. The ECS service exists but shows 0 running tasks (placeholder image) — expected until Step 4.
+**Success looks like:** the Deploy stage log ends with `App layer applied; outputs exported to s3://<state-bucket>/app-outputs/latest.json`, and that object exists. The ECS service exists but shows 0 running tasks (placeholder image): expected until Step 4.
 
-### Step 4 — Push the backend source (image → ECR → ECS)
+### Step 4: Push the backend source (image → ECR → ECS)
 
 ```bash
 scripts/push-source.sh backend <backend-source-bucket>
@@ -479,7 +477,7 @@ After scan (gitleaks, bandit, pip-audit) and unit-test gates (ruff, mypy --stric
 
 **Success looks like:** `aws ecs wait services-stable` inside the Deploy stage succeeds and the log ends with `Service <env>-voice-service is stable on <image-uri>`. Running task count reaches 2. Now copy that image URI into `container_image` in your tfvars (and commit) per the Step 2 catch-up contract.
 
-### Step 5 — Re-apply bootstrap with the frontend targets (two-phase)
+### Step 5: Re-apply bootstrap with the frontend targets (two-phase)
 
 The frontend pipeline needs the bucket and distribution the app layer just created. Read them from the exported outputs, then re-apply bootstrap:
 
@@ -496,9 +494,9 @@ terraform apply \
   -var "cloudfront_distribution_id=<cloudfront_distribution_id>"
 ```
 
-**Success looks like:** `Apply complete` with the frontend pipeline's Deploy CodeBuild project updated in place — its `FRONTEND_BUCKET` and `CLOUDFRONT_DISTRIBUTION_ID` environment variables are now populated (the deploy buildspec fails fast while either is empty).
+**Success looks like:** `Apply complete` with the frontend pipeline's Deploy CodeBuild project updated in place: its `FRONTEND_BUCKET` and `CLOUDFRONT_DISTRIBUTION_ID` environment variables are now populated (the deploy buildspec fails fast while either is empty).
 
-### Step 6 — Push the frontend source
+### Step 6: Push the frontend source
 
 ```bash
 scripts/push-source.sh frontend <frontend-source-bucket>
@@ -508,7 +506,7 @@ After scan (gitleaks, `npm audit --audit-level=high`, eslint) and test (`npx vit
 
 **Success looks like:** the Deploy log ends with `Frontend deployed to s3://<frontend-bucket> and invalidation issued for distribution <id>`. The portal is reachable at the `portal_url` output (`https://<cloudfront-domain>`), and the sign-in button redirects to the Cognito hosted UI.
 
-**First-deploy note — create an engineer account.** Enrollment is closed (admin-create only); engineers sign in with their email address. Get the pool id from the exported outputs (`cognito_user_pool_id`) and create a user:
+**First-deploy note: create an engineer account.** Enrollment is closed (admin-create only); engineers sign in with their email address. Get the pool id from the exported outputs (`cognito_user_pool_id`) and create a user:
 
 ```bash
 aws cognito-idp admin-create-user \
@@ -521,7 +519,7 @@ aws cognito-idp admin-create-user \
 
 The password policy requires 12+ characters with all four character classes; the hosted UI forces a password change on first sign-in. `scripts/deploy.sh create-user --username <engineer@example.com>` wraps this command and skips it idempotently when the account already exists.
 
-### Step 7 — Post-deploy smoke tests
+### Step 7: Post-deploy smoke tests
 
 Run the read-only smoke checks against the deployed environment using the exported outputs:
 
@@ -553,7 +551,7 @@ PYTHONPATH=.. .venv/bin/lint-imports
 PYTHONPATH=.. .venv/bin/python -m pytest -q
 ```
 
-All tests (unit + hypothesis property suites) run against in-memory fakes — no AWS access needed.
+All tests (unit + hypothesis property suites) run against in-memory fakes: no AWS access needed.
 
 ### Frontend (`frontend/`)
 
@@ -580,7 +578,7 @@ uv pip install --python .venv-iac/bin/python -r infrastructure/tests/requirement
 .venv-iac/bin/python -m pytest infrastructure/tests -q
 ```
 
-The plan-assertion suites (`test_bootstrap_plan.py`, `test_app_plan.py`) need AWS credentials and the `terraform` binary — the AWS provider resolves data sources at plan time — and skip with a clear message otherwise; their primary home is the IaC pipeline's test stage. The negative-validation suite (`test_negative_validation.py`) needs no credentials and never touches AWS.
+The plan-assertion suites (`test_bootstrap_plan.py`, `test_app_plan.py`) need AWS credentials and the `terraform` binary (the AWS provider resolves data sources at plan time), and skip with a clear message otherwise; their primary home is the IaC pipeline's test stage. The negative-validation suite (`test_negative_validation.py`) needs no credentials and never touches AWS.
 
 ## Known limitations
 
@@ -615,9 +613,9 @@ This is sample code. Before any use beyond a test account, review these defaults
 
 **Logs**: voice-service and Notifier structured JSON logs (session-id-scoped) in CloudWatch Logs (`log_retention_days`, default 90); WAF logs for both scopes (`waf_log_retention_days`, default 365); ALB access logs to the operator-provided access-logging bucket.
 
-**Data retention**: voice-session and transcript records carry a DynamoDB TTL of last update + `session_retention_days` (default 30 days). Push subscriptions have no TTL — they are removed on unsubscribe or on push-service 404/410 rejection.
+**Data retention**: voice-session and transcript records carry a DynamoDB TTL of last update + `session_retention_days` (default 30 days). Push subscriptions have no TTL: they are removed on unsubscribe or on push-service 404/410 rejection.
 
-**Origin-verify secret rotation**: the secret is Terraform-generated (`random_password.origin_verify` in `infrastructure/app/main.tf`). To rotate, mark it for replacement against the app layer's remote state, then let the IaC pipeline plan and apply — CloudFront, the ALB rule, and the SSM parameter update together:
+**Origin-verify secret rotation**: the secret is Terraform-generated (`random_password.origin_verify` in `infrastructure/app/main.tf`). To rotate, mark it for replacement against the app layer's remote state, then let the IaC pipeline plan and apply: CloudFront, the ALB rule, and the SSM parameter update together:
 
 ```bash
 cd infrastructure/app
@@ -634,13 +632,13 @@ terraform apply -replace=random_password.origin_verify -refresh-only
 scripts/push-source.sh iac <iac-source-bucket>   # from the repo root; approve and deploy
 ```
 
-If you would rather rotate in one local step without the pipeline review, run `terraform apply -replace=random_password.origin_verify` directly against the app layer (no `-refresh-only`) — but the reviewed-plan path above keeps the change auditable through the ManualApproval gate.
+If you would rather rotate in one local step without the pipeline review, run `terraform apply -replace=random_password.origin_verify` directly against the app layer (no `-refresh-only`), but the reviewed-plan path above keeps the change auditable through the ManualApproval gate.
 
 **Scaling knobs** (`infrastructure/app/variables.tf`): `max_capacity` (default 10), `scale_out_threshold` (default 80) and `scale_in_threshold` (default 20) on ALB `ActiveConnectionCount`. The floor is fixed at 2 tasks across 2+ AZs, and scale-in never terminates a task holding live voice sessions (ECS task scale-in protection).
 
 ## Further reading
 
-- `infrastructure/bootstrap/variables.tf`, `infrastructure/app/variables.tf` — every input variable with validation rules
-- `ci/iac/build.yml`, `ci/backend/deploy.yml`, `ci/frontend/deploy.yml` — the tfvars, image catch-up, and outputs-export contracts
-- `scripts/deploy.sh --help`, `scripts/push-source.sh --help` header, and `scripts/smoke/run-all.sh` — operator tooling details
-- `.kiro/steering/` — coding conventions for `backend/`, `frontend/`, and `infrastructure/`
+- `infrastructure/bootstrap/variables.tf`, `infrastructure/app/variables.tf`: every input variable with validation rules
+- `ci/iac/build.yml`, `ci/backend/deploy.yml`, `ci/frontend/deploy.yml`: the tfvars, image catch-up, and outputs-export contracts
+- `scripts/deploy.sh --help`, `scripts/push-source.sh --help` header, and `scripts/smoke/run-all.sh`: operator tooling details
+- `.kiro/steering/`: coding conventions for `backend/`, `frontend/`, and `infrastructure/`

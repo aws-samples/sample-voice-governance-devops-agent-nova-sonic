@@ -2,7 +2,7 @@
 
 ## Overview
 
-Implementation follows the design's dependency structure: repository scaffolding and quality-gate tooling first, then shared backend primitives, pure domain modules with their property-based tests, port interfaces and AWS adapters, orchestration plus the FastAPI app, the Notifier Lambda, the frontend SPA, and finally the two Terraform layers with pipeline buildspecs, infrastructure tests, and documentation. Languages per design: Python 3.14 (backend), JavaScript ES modules (frontend), Terraform HCL (infrastructure). All 20 design correctness properties are implemented as property-based tests (hypothesis for Python, fast-check for JS, ≥100 iterations each) placed next to the code they validate and executed against in-memory fakes — no AWS access.
+Implementation follows the design's dependency structure: repository scaffolding and quality-gate tooling first, then shared backend primitives, pure domain modules with their property-based tests, port interfaces and AWS adapters, orchestration plus the FastAPI app, the Notifier Lambda, the frontend SPA, and finally the two Terraform layers with pipeline buildspecs, infrastructure tests, and documentation. Languages per design: Python 3.14 (backend), JavaScript ES modules (frontend), Terraform HCL (infrastructure). All 20 design correctness properties are implemented as property-based tests (hypothesis for Python, fast-check for JS, ≥100 iterations each) placed next to the code they validate and executed against in-memory fakes, no AWS access.
 
 ## Tasks
 
@@ -73,7 +73,7 @@ Implementation follows the design's dependency structure: repository scaffolding
     - **Validates: Requirements 3.3**
     - `backend/voice_service/tests/property/test_p04_chunks.py`, hypothesis ≥100 examples, tag `# Feature: nova-sonic-support-portal, Property 4: Streamed chunk accumulation equals concatenation`
   - [x] 3.8 Implement guardrail fail-closed decision function
-    - `backend/voice_service/app/domain/guardrail_policy.py`: pure `decide(response | error) -> Decision` — PASS only on `action == "NONE"` with all Automated Reasoning findings VALID; BLOCK on GUARDRAIL_INTERVENED, any non-VALID finding (INVALID / SATISFIABLE / IMPOSSIBLE / TRANSLATION_AMBIGUOUS / NO_TRANSLATION), SDK exception, timeout, or malformed response
+    - `backend/voice_service/app/domain/guardrail_policy.py`: pure `decide(response | error) -> Decision`: PASS only on `action == "NONE"` with all Automated Reasoning findings VALID; BLOCK on GUARDRAIL_INTERVENED, any non-VALID finding (INVALID / SATISFIABLE / IMPOSSIBLE / TRANSLATION_AMBIGUOUS / NO_TRANSLATION), SDK exception, timeout, or malformed response
     - _Requirements: 4.4, 4.6, 4.7_
   - [x] 3.9 Implement TTL computation
     - `backend/voice_service/app/domain/ttl.py`: last update time + configurable retention period (default 30 days), expressed in epoch seconds
@@ -91,10 +91,10 @@ Implementation follows the design's dependency structure: repository scaffolding
     - `backend/voice_service/app/ports/`: `BedrockStreamPort` (open/send_event/receive/close), `DevOpsAgentPort` (create_chat, send_message async iterator), `GuardrailPort` (evaluate → GuardrailResult), `SessionStorePort` (sessions, chats, transcripts, subscriptions), `TaskProtectionPort` (acquire/release) as abstract base classes
     - _Requirements: 17.6_
   - [x] 5.2 Implement in-memory fakes for all ports
-    - `backend/voice_service/tests/fakes.py`: FakeBedrockStream, FakeDevOpsAgent, FakeGuardrail, FakeSessionStore, FakeTaskProtection, FakeClock — deterministic, no AWS access, used by all property and unit tests
+    - `backend/voice_service/tests/fakes.py`: FakeBedrockStream, FakeDevOpsAgent, FakeGuardrail, FakeSessionStore, FakeTaskProtection, FakeClock. They are deterministic, need no AWS access, and are used by all property and unit tests
     - _Requirements: 17.6_
   - [x] 5.3 Implement Bedrock bidirectional stream adapter
-    - `backend/voice_service/app/adapters/bedrock_stream_client.py`: `InvokeModelWithBidirectionalStream` over HTTP/2 (TLS) in us-east-1; event grammar encode/decode — sessionStart, promptStart with `ask_devops_agent` toolSpec, content blocks, base64 audioInput/audioOutput, toolUse/toolResult, promptEnd/sessionEnd; `StreamOpenError` on open failure
+    - `backend/voice_service/app/adapters/bedrock_stream_client.py`: `InvokeModelWithBidirectionalStream` over HTTP/2 (TLS) in us-east-1; event grammar encode/decode: sessionStart, promptStart with `ask_devops_agent` toolSpec, content blocks, base64 audioInput/audioOutput, toolUse/toolResult, promptEnd/sessionEnd; `StreamOpenError` on open failure
     - _Requirements: 1.6, 2.1, 3.1, 3.4, 12.7, 12.8_
   - [x] 5.4 Implement DevOps Agent adapter
     - `backend/voice_service/app/adapters/devops_agent_client.py`: boto3 `devops-agent` client (`aidevops:CreateChat` / `aidevops:SendMessage`) isolated via aioboto3/`asyncio.to_thread`; streamed chunks as async iterator; optional executionId scoping on chat creation; `AgentRequestError` on failure
@@ -139,7 +139,7 @@ Implementation follows the design's dependency structure: repository scaffolding
     - First-call chat creation and missing-mapping recovery; agent API failure returns spoken error indication; 60-second timeout stops stream consumption
     - _Requirements: 3.2, 3.7, 3.8, 3.10_
   - [x] 6.9 Implement voice session manager
-    - `backend/voice_service/app/orchestration/voice_session_manager.py`: per-connection asyncio task group — inbound audio pump (forward ≤500 ms after receipt), outbound pump (audioOutput → binary frames, textOutput → transcript frames + accumulator), segmentation timer with rollover (drain, replay via 3.2, flush buffered audio FIFO), token-expiry watchdog (auth_expired frame, close, drop post-expiry audio), transcript persister with bounded retry; every Session_Store write completes before the state change is reported (state frames after store write); session end → promptEnd/sessionEnd, persist final transcript, status ENDED; reconnect via resumeSessionId → restore persisted state + transcripts and replay into a fresh stream, or `session_not_found` error; stream-open failure → `bedrock_unavailable` error frame, close, end session; segmentation failure/watchdog → persist partial transcript, `segmentation_failed` frame, log with session id; incident-scoped sessions inject summary/severity into the system prompt
+    - `backend/voice_service/app/orchestration/voice_session_manager.py`: per-connection asyncio task group, inbound audio pump (forward ≤500 ms after receipt), outbound pump (audioOutput → binary frames, textOutput → transcript frames + accumulator), segmentation timer with rollover (drain, replay via 3.2, flush buffered audio FIFO), token-expiry watchdog (auth_expired frame, close, drop post-expiry audio), transcript persister with bounded retry; every Session_Store write completes before the state change is reported (state frames after store write); session end → promptEnd/sessionEnd, persist final transcript, status ENDED; reconnect via resumeSessionId → restore persisted state + transcripts and replay into a fresh stream, or `session_not_found` error; stream-open failure → `bedrock_unavailable` error frame, close, end session; segmentation failure/watchdog → persist partial transcript, `segmentation_failed` frame, log with session id; incident-scoped sessions inject summary/severity into the system prompt
     - _Requirements: 1.2, 1.3, 1.6, 2.2, 2.4, 2.5, 2.6, 2.7, 5.8, 7.6, 8.2, 8.3, 8.6, 8.7, 9.5_
   - [x]* 6.10 Write property test for persist-before-confirm ordering
     - **Property 11: State changes persist before they are confirmed**
@@ -263,10 +263,10 @@ Implementation follows the design's dependency structure: repository scaffolding
     - `infrastructure/app/modules/cloudfront_s3/` (frontend bucket with OAC-only read policy denying all other principals, dual origin S3 + ALB for `/ws/*` and `/api/*`, redirect-http-to-https, origin-verify header injection), `modules/waf/` (CLOUDFRONT + REGIONAL web ACLs, AWSManagedRulesCommonRuleSet + AWSManagedRulesKnownBadInputsRuleSet in block mode, WAF logging with timestamp/source IP/URI/rule id to a persistent destination), `modules/s3_policies/` (deny `aws:SecureTransport=false` and TLS <1.2 on every created bucket)
     - _Requirements: 9.1, 11.1, 11.2, 11.3, 11.5, 11.6, 12.1, 12.2, 13.2, 13.3, 13.7_
   - [x] 12.4 Implement notifications and observability modules
-    - `infrastructure/app/modules/notifications/` (EventBridge rules for CloudWatch Alarms, Incident Manager, and DevOps Agent findings; notifier Lambda packaging, environment, and IAM; optional SNS escalation topic), `modules/observability/` (CloudWatch alarms for running task count, ALB unhealthy targets, Voice_Service error rate, and Notifier delivery failures — each with metric, threshold, and evaluation period — with alarm actions publishing to the operations SNS topic)
+    - `infrastructure/app/modules/notifications/` (EventBridge rules for CloudWatch Alarms, Incident Manager, and DevOps Agent findings; notifier Lambda packaging, environment, and IAM; optional SNS escalation topic), `modules/observability/` (CloudWatch alarms for running task count, ALB unhealthy targets, Voice_Service error rate, and Notifier delivery failures, each with metric, threshold, evaluation period, and alarm actions publishing to the operations SNS topic)
     - _Requirements: 5.1, 5.11, 15.4, 19.2, 19.3_
   - [x] 12.5 Implement app-layer root with validated variables
-    - `infrastructure/app/main.tf` / `variables.tf` / `outputs.tf`: input variables for environment name, account inputs, `access_logging_bucket_name` (validation block rejecting empty values with a clear message), scaling thresholds, retention days — no hardcoded environment values; outputs feeding frontend `config.json` generation; separate app-layer state backend pointing at the bootstrap-created bucket/lock table
+    - `infrastructure/app/main.tf` / `variables.tf` / `outputs.tf`: input variables for environment name, account inputs, `access_logging_bucket_name` (validation block rejecting empty values with a clear message), scaling thresholds, retention days: no hardcoded environment values; outputs feeding frontend `config.json` generation; separate app-layer state backend pointing at the bootstrap-created bucket/lock table
     - _Requirements: 13.4, 13.6, 14.3, 15.5, 15.6, 15.7_
 
 - [x] 13. CI/CD buildspecs and infrastructure tests
@@ -285,7 +285,7 @@ Implementation follows the design's dependency structure: repository scaffolding
 
 - [x] 14. Documentation
   - [x] 14.1 Write README with architecture, prerequisites, and deployment steps
-    - `README.md` at the repository root: architecture overview; prerequisites list (AWS account with Bedrock Nova 2 Sonic + Guardrails Automated Reasoning access, Terraform ≥1.9, AWS CLI, Docker, Node 24, Python 3.14); step-by-step deployment in order — bootstrap `terraform init/apply`, push iac source (IaC_Pipeline applies the app layer), push backend source (image → ECR → ECS), push frontend source (build → s3 sync → invalidation) — each step with the exact command and the observable outcome indicating success
+    - `README.md` at the repository root: architecture overview; prerequisites list (AWS account with Bedrock Nova 2 Sonic + Guardrails Automated Reasoning access, Terraform ≥1.9, AWS CLI, Docker, Node 24, Python 3.14); step-by-step deployment in order: bootstrap `terraform init/apply`, push iac source (IaC_Pipeline applies the app layer), push backend source (image → ECR → ECS), push frontend source (build → s3 sync → invalidation). Each step comes with the exact command and the observable outcome indicating success
     - _Requirements: 18.2, 18.5_
 
 - [x] 15. Final checkpoint - Full local quality gate
@@ -299,7 +299,7 @@ Implementation follows the design's dependency structure: repository scaffolding
 
 - Tasks marked with `*` are optional and can be skipped for a faster MVP: all test-only sub-tasks, the SNS escalation channel (8.6), the Terraform plan-assertion and negative-validation suites (13.2, 13.3), and the post-deploy smoke scripts (13.4)
 - Each of the design's 20 correctness properties has exactly one property-based test sub-task, placed next to the code it validates; backend tests use hypothesis, frontend tests use fast-check, all with ≥100 iterations and the tag comment format `# Feature: nova-sonic-support-portal, Property N: <name>` (`//` in JS)
-- All property and unit tests run against the in-memory fakes from task 5.2 (FakeBedrockStream, FakeDevOpsAgent, FakeSessionStore, FakeTaskProtection, FakeClock) — no AWS access required
+- All property and unit tests run against the in-memory fakes from task 5.2 (FakeBedrockStream, FakeDevOpsAgent, FakeSessionStore, FakeTaskProtection, FakeClock): no AWS access required
 - Each task references the granular acceptance criteria it implements for traceability; Requirement 19.1 (Well-Architected documentation) is already satisfied by the design document
 - Checkpoints (tasks 4, 7, 10, 15) ensure incremental validation at phase boundaries
 - This plan covers writing code, tests, Terraform, buildspecs, and documentation only; actual AWS deployment (terraform apply against an account, pipeline runs) is performed by the operator per the README

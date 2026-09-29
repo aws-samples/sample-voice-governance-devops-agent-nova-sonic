@@ -268,7 +268,7 @@ The entire deployment is provisioned with Terraform in two layers (bootstrap and
 
 1. THE Bootstrap_Layer SHALL create three separate pipelines: the Frontend_Pipeline, the Backend_Pipeline, and the IaC_Pipeline, each connected to its own source repository.
 2. WHEN a commit is pushed to the monitored branch of a pipeline's source repository, THE corresponding pipeline SHALL start a new execution automatically without manual intervention.
-3. WHEN a pipeline execution starts, THE pipeline SHALL run three separate CodeBuild stages in order — a security scan stage, a unit test stage, and a build-and-plan stage — starting each stage only after the preceding stage completes successfully.
+3. WHEN a pipeline execution starts, THE pipeline SHALL run three separate CodeBuild stages in order (a security scan stage, a unit test stage, and a build-and-plan stage), starting each stage only after the preceding stage completes successfully.
 4. IF the security scan stage detects one or more findings of high or critical severity, THEN THE security scan stage SHALL fail.
 5. IF any CodeBuild stage fails, THEN THE pipeline SHALL stop the execution, mark the execution as failed, and SHALL NOT execute any subsequent stage, including the deployment stage.
 6. WHEN all three CodeBuild stages succeed, THE pipeline SHALL pause at a manual approval stage before the deployment stage.

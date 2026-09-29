@@ -19,8 +19,8 @@ Design elements are annotated with the requirements they satisfy: *(Req X.Y)*. A
 These findings from AWS documentation drive non-obvious parts of the design:
 
 1. **Nova Sonic bidirectional event protocol.** Sessions follow a strict event grammar: `sessionStart` (inference config) → `promptStart` (prompt name, audio output config, **tool configuration**) → content blocks (`contentStart` / `audioInput` or `textInput` / `contentEnd`). The model emits `completionStart`, ASR/text `textOutput`, `audioOutput`, `toolUse`, and `contentEnd` events. Tool results are returned into the same stream as `contentStart(type=TOOL, toolUseId)` → `toolResult` (stringified JSON) → `contentEnd`. Source: [Nova 2 Sonic input events](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-input-events.html), [output events](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-output-events.html). This grammar defines the segmentation replay sequence in this design. *(Req 2.3, 3.1)*
-2. **Automated Reasoning checks are detect-mode.** Per [AWS documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/integrate-automated-reasoning-checks.html), Automated Reasoning checks "return findings and feedback rather than blocking content" — the application decides. Therefore the **fail-closed enforcement point is the Voice_Service**: it calls the standalone [`ApplyGuardrail` API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ApplyGuardrail.html) on every tool input and forwards to the DevOps Agent only on an explicit pass. Any intervention, non-VALID finding, evaluation error, or unavailability results in a block. *(Req 4.1, 4.6, 4.7)*
-3. **CodeCommit is closed to new customers** (since July 2024). The Bootstrap_Layer must create source repositories that pipelines consume without manually created resources *(Req 15.2)*. Options considered: CodeConnections (requires a manual console handshake and an external Git host account — violates the no-manual-resources constraint), CodeCatalyst (separate service onboarding), **versioned S3 source buckets (chosen)** — fully Terraform-provisionable, auto-trigger via EventBridge on object upload, no external dependencies. Developers push with a small `push-source.sh` helper (`git archive` → `aws s3 cp`), which is the "commit push" trigger event for pipelines. *(Req 15.2, 16.1, 16.2)*
+2. **Automated Reasoning checks are detect-mode.** Per [AWS documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/integrate-automated-reasoning-checks.html), Automated Reasoning checks "return findings and feedback rather than blocking content", the application decides. Therefore the **fail-closed enforcement point is the Voice_Service**: it calls the standalone [`ApplyGuardrail` API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ApplyGuardrail.html) on every tool input and forwards to the DevOps Agent only on an explicit pass. Any intervention, non-VALID finding, evaluation error, or unavailability results in a block. *(Req 4.1, 4.6, 4.7)*
+3. **CodeCommit is closed to new customers** (since July 2024). The Bootstrap_Layer must create source repositories that pipelines consume without manually created resources *(Req 15.2)*. Options considered: CodeConnections (requires a manual console handshake and an external Git host account, which violates the no-manual-resources constraint), CodeCatalyst (separate service onboarding), **versioned S3 source buckets (chosen)**: fully Terraform-provisionable, auto-trigger via EventBridge on object upload, no external dependencies. Developers push with a small `push-source.sh` helper (`git archive` → `aws s3 cp`), which is the "commit push" trigger event for pipelines. *(Req 15.2, 16.1, 16.2)*
 4. **DevOps Agent SDK**: available in boto3 as client `devops-agent` with `create_chat` and `send_message` (streaming response) operations; IAM actions are namespaced `aidevops:CreateChat` / `aidevops:SendMessage`. *(Req 3.2, 3.3)*
 5. **ECS task scale-in protection** is set from inside the task via `PUT $ECS_AGENT_URI/task-protection/v1/state` (or the `ecs:UpdateTaskProtection` API), with an optional expiry that must be refreshed for long sessions. *(Req 10.3, 10.4)*
 6. **AppSync Events** supports Cognito user pool auth for browser subscriptions over its realtime WebSocket endpoint, and an HTTP `POST /event` publish API (IAM/SigV4) usable directly from Lambda. *(Req 5.1, 7.4)*
@@ -120,7 +120,7 @@ sequenceDiagram
                 DA-->>VS: streamed chunks → accumulated text (Req 3.3)
                 VS->>NS: toolResult(answer text) (Req 3.4)
             else blocked / error / unclassifiable
-                VS->>NS: toolResult(refusal text) — fail closed (Req 4.3, 4.6, 4.7)
+                VS->>NS: toolResult(refusal text), fail closed (Req 4.3, 4.6, 4.7)
                 VS->>VS: audit log (content, session, identity, timestamp) (Req 4.5)
             end
         end
@@ -147,7 +147,7 @@ stateDiagram-v2
         Replay --> FlushBuffer: deliver buffered audio FIFO (Req 2.4)
     }
     SEGMENTING --> LIVE: rollover complete
-    SEGMENTING --> ERROR: failure or >10s timeout —\npersist partial transcript, error frame, log (Req 2.6)
+    SEGMENTING --> ERROR: failure or >10s timeout: \npersist partial transcript, error frame, log (Req 2.6)
     LIVE --> ENDED: engineer ends / WS closes (Req 2.5)
     ERROR --> [*]
     ENDED --> [*]
@@ -156,7 +156,7 @@ stateDiagram-v2
 Segmentation invariants:
 
 - The replay sequence into the new stream is exactly: `sessionStart` → `promptStart` (same tool configuration) → system-prompt text block → conversation history as alternating USER/ASSISTANT text blocks **in original chronological order** → then buffered audio in arrival order. *(Req 2.3, 2.4)*
-- The audio buffer is bounded at 30 seconds of audio (960 KB at 16 kHz × 16-bit mono); if the bound is reached, the oldest unbuffered state is preserved by dropping the newest frames and noting the drop in logs — engineers hear a brief "please hold" tone via a status frame so speech during rollover is not silently lost.
+- The audio buffer is bounded at 30 seconds of audio (960 KB at 16 kHz × 16-bit mono); if the bound is reached, the oldest unbuffered state is preserved by dropping the newest frames and noting the drop in logs: engineers hear a brief "please hold" tone via a status frame so speech during rollover is not silently lost.
 - A watchdog fails segmentation if the new stream is not live within 10 seconds: partial transcript is persisted, a structured `segmentation_failed` error frame is sent, and the failure is logged with the Voice_Session id. *(Req 2.6)*
 
 ### Notification Plane
@@ -228,7 +228,7 @@ Deployment order (documented step-by-step in README.md *(Req 18.2, 18.5)*):
 
 ### Backend: Voice_Service (ECS Fargate)
 
-Python 3.14, FastAPI + uvicorn, `websockets`-based WS endpoint, fully async (`async`/`await` for all I/O; no blocking calls on the event loop — blocking SDK surfaces are isolated behind adapters using `aioboto3`/`httpx` or `asyncio.to_thread`) *(Req 17.2, 17.3)*.
+Python 3.14, FastAPI + uvicorn, `websockets`-based WS endpoint, fully async (`async`/`await` for all I/O; no blocking calls on the event loop: blocking SDK surfaces are isolated behind adapters using `aioboto3`/`httpx` or `asyncio.to_thread`) *(Req 17.2, 17.3)*.
 
 Modules follow SOLID: pure domain logic depends only on **port interfaces** (abstract base classes); AWS SDKs appear only in adapter modules *(Req 17.6)*. This isolation is what makes the correctness properties testable with fakes.
 
@@ -242,7 +242,7 @@ backend/
 │   │   ├── logging.py               # Structured JSON logs: timestamp, severity, session_id (Req 19.4)
 │   │   ├── auth/
 │   │   │   └── jwt_validator.py     # Cognito JWKS validation at WS handshake (Req 7.2, 7.3, 7.6)
-│   │   ├── domain/                  # pure logic — no I/O, fully unit/property testable
+│   │   ├── domain/                  # pure logic: no I/O, fully unit/property testable
 │   │   │   ├── session.py           # Voice_Session state machine (CONNECTING/LIVE/SEGMENTING/ENDED/ERROR)
 │   │   │   ├── segmentation.py      # rollover scheduling (7m30s), replay-sequence builder (Req 2.2, 2.3)
 │   │   │   ├── audio_buffer.py      # bounded FIFO buffer, 30s cap (Req 2.4)
@@ -269,7 +269,7 @@ backend/
 │   │       └── ws_messages.py       # WS frame schemas (see Data Models) + (de)serialization
 │   ├── tests/                       # pytest + pytest-asyncio + hypothesis
 │   ├── Dockerfile
-│   └── pyproject.toml               # ruff (D, ASYNC, BLE, TRY rules), mypy — build fails on violation (Req 17.7)
+│   └── pyproject.toml               # ruff (D, ASYNC, BLE, TRY rules), mypy: build fails on violation (Req 17.7)
 ├── notifier/
 │   ├── src/
 │   │   ├── handler.py               # Lambda entrypoint (asyncio.run)
@@ -288,7 +288,7 @@ backend/
 
 Key component behaviors:
 
-- **voice_session_manager**: one asyncio task group per WebSocket connection — inbound pump (WS → Bedrock), outbound pump (Bedrock → WS), segmentation timer, token-expiry watchdog *(Req 7.6)*, transcript persister. Sends state frames on every transition *(Req 9.4, 9.5)*.
+- **voice_session_manager**: one asyncio task group per WebSocket connection, inbound pump (WS → Bedrock), outbound pump (Bedrock → WS), segmentation timer, token-expiry watchdog *(Req 7.6)*, transcript persister. Sends state frames on every transition *(Req 9.4, 9.5)*.
 - **tool_router**: on `toolUse(ask_devops_agent)`: guardrail gate → chat lookup/create in Session_Store (create once per session, reuse thereafter; recreate + persist if the mapping is missing) *(Req 3.2, 3.9, 3.10)* → `send_message` with a 60-second budget enforced by `asyncio.timeout`; chunks accumulated in arrival order into one text; result returned as `toolResult` *(Req 3.3, 3.4, 3.8)*. Sessions opened from an incident scope `create_chat` to the executionId *(Req 3.5, 3.6)*.
 - **task protection manager** (inside `ecs_task_protection` + session registry): protection acquired when the live-session count goes 0→1 and released within 60 s of the count reaching 0; the protection expiry is refreshed on a rolling basis for long sessions. On protection failure after 3 retries the task flips `/healthz` to 503 so the ALB stops routing new connections while existing sessions continue *(Req 10.3, 10.4, 10.7, 19.6, 19.7)*.
 - **drain_manager**: on SIGTERM, reject new WebSocket upgrades and mark `/healthz` 503; existing sessions continue for up to the ECS `stopTimeout` (120 s); any session still active at expiry receives `{"type":"session.terminating"}` before close *(Req 10.5, 10.8)*.
@@ -296,7 +296,7 @@ Key component behaviors:
 
 ### Frontend (SPA)
 
-Vanilla ES modules + Bootstrap 5 (responsive 320–1920 px, no horizontal scrolling) *(Req 9.2)*. Served from S3 via CloudFront. Environment-specific values (Cognito pool/client ids, CloudFront wss URL, AppSync Events endpoints, VAPID public key) are loaded at runtime from `config.json`, generated by the frontend pipeline from Terraform outputs — the built artifact is environment-independent *(Req 14.3)*.
+Vanilla ES modules + Bootstrap 5 (responsive 320–1920 px, no horizontal scrolling) *(Req 9.2)*. Served from S3 via CloudFront. Environment-specific values (Cognito pool/client ids, CloudFront wss URL, AppSync Events endpoints, VAPID public key) are loaded at runtime from `config.json`, generated by the frontend pipeline from Terraform outputs: the built artifact is environment-independent *(Req 14.3)*.
 
 ```
 frontend/
@@ -330,7 +330,7 @@ Browser support gate: on load, `capability.js` verifies `navigator.mediaDevices.
 
 ```
 infrastructure/
-├── bootstrap/                     # layer 1 — separate state (Req 15.6)
+├── bootstrap/                     # layer 1: separate state (Req 15.6)
 │   ├── main.tf  variables.tf  outputs.tf
 │   └── modules/
 │       ├── source_buckets/        # 3 versioned S3 source buckets + EventBridge triggers (Req 16.1, 16.2)
@@ -338,7 +338,7 @@ infrastructure/
 │       ├── codebuild/             # per-stage projects, buildspecs from repo
 │       ├── ecr/                   # backend image repo (scan-on-push, SSE) (Req 12.3)
 │       └── state_backend/         # app-layer TF state bucket + DynamoDB lock table
-└── app/                           # layer 2 — separate state, applied by IaC_Pipeline
+└── app/                           # layer 2: separate state, applied by IaC_Pipeline
     ├── main.tf  variables.tf  outputs.tf   # vars: environment, access_logging_bucket_name (validated non-empty), thresholds (Req 13.4, 13.6, 15.5, 15.7)
     └── modules/
         ├── network/               # VPC, 2+ AZ public/private subnets, NAT
@@ -361,7 +361,7 @@ infrastructure/
                                    # notifier failures) → ops SNS topic (Req 19.2, 19.3)
 ```
 
-All environment-specific values (environment name, account inputs, `access_logging_bucket_name`, scaling thresholds, retention period) are input variables — never hardcoded *(Req 15.5)*; `access_logging_bucket_name` uses a `validation` block rejecting empty values so `terraform validate`/`plan` fails with a clear message *(Req 13.6, 15.7)*. The logging bucket itself is **referenced, never created** *(Req 13.5)*.
+All environment-specific values (environment name, account inputs, `access_logging_bucket_name`, scaling thresholds, retention period) are input variables: never hardcoded *(Req 15.5)*; `access_logging_bucket_name` uses a `validation` block rejecting empty values so `terraform validate`/`plan` fails with a clear message *(Req 13.6, 15.7)*. The logging bucket itself is **referenced, never created** *(Req 13.5)*.
 
 ### Repository Deliverables
 
@@ -377,7 +377,7 @@ Top-level layout is exactly `infrastructure/`, `frontend/`, `backend/` *(Req 18.
 
 All tables: on-demand capacity, SSE enabled, point-in-time recovery. TTL attribute `ttl` (epoch seconds) enabled where noted. *(Req 8.1, 12.3)*
 
-**`{env}-voice-sessions`** — Voice_Session state *(Req 8.1, 8.2)*
+**`{env}-voice-sessions`**: Voice_Session state *(Req 8.1, 8.2)*
 
 | Attribute | Type | Notes |
 |---|---|---|
@@ -392,7 +392,7 @@ All tables: on-demand capacity, SSE enabled, point-in-time recovery. TTL attribu
 
 GSI `by-engineer`: PK `engineer_id`, SK `created_at` (reconnect lookup).
 
-**`{env}-agent-chats`** — DevOps_Agent chat/execution mapping *(Req 3.2, 8.1)*
+**`{env}-agent-chats`**: DevOps_Agent chat/execution mapping *(Req 3.2, 8.1)*
 
 | Attribute | Type | Notes |
 |---|---|---|
@@ -402,7 +402,7 @@ GSI `by-engineer`: PK `engineer_id`, SK `created_at` (reconnect lookup).
 | `created_at` / `updated_at` | S | |
 | `ttl` | N | aligned with the owning session |
 
-**`{env}-push-subscriptions`** — Web_Push_Subscriptions *(Req 6.1, 8.1, 8.7)*
+**`{env}-push-subscriptions`**: Web_Push_Subscriptions *(Req 6.1, 8.1, 8.7)*
 
 | Attribute | Type | Notes |
 |---|---|---|
@@ -411,9 +411,9 @@ GSI `by-engineer`: PK `engineer_id`, SK `created_at` (reconnect lookup).
 | `subscription` | M | `{endpoint, keys:{p256dh, auth}}` |
 | `created_at` / `updated_at` | S | |
 
-No TTL — removed explicitly on unsubscribe or on push-service rejection (404/410) *(Req 6.5)*. Notifier fan-out reads the full table (bounded population: engineers on call).
+No TTL: removed explicitly on unsubscribe or on push-service rejection (404/410) *(Req 6.5)*. Notifier fan-out reads the full table (bounded population: engineers on call).
 
-**`{env}-transcripts`** — conversation transcripts *(Req 2.5, 8.1, 8.3)*
+**`{env}-transcripts`**: conversation transcripts *(Req 2.5, 8.1, 8.3)*
 
 | Attribute | Type | Notes |
 |---|---|---|
@@ -428,7 +428,7 @@ Write discipline: every state mutation is a single-item conditional write (or a 
 
 ### WebSocket Protocol (Frontend ↔ Voice_Service)
 
-Endpoint: `wss://{cloudfront-domain}/ws/voice`. Authentication: the Cognito access token travels in the `Sec-WebSocket-Protocol` header as subprotocol pair `("bearer", "<jwt>")` — browsers cannot set custom WS headers, and this keeps tokens out of URLs and access logs. The server validates before `accept()` *(Req 7.2, 7.3)*.
+Endpoint: `wss://{cloudfront-domain}/ws/voice`. Authentication: the Cognito access token travels in the `Sec-WebSocket-Protocol` header as subprotocol pair `("bearer", "<jwt>")`: browsers cannot set custom WS headers, and this keeps tokens out of URLs and access logs. The server validates before `accept()` *(Req 7.2, 7.3)*.
 
 Binary frames (both directions) carry raw PCM audio: client→server 16 kHz / 16-bit / mono *(Req 1.1)*; server→client 24 kHz / 16-bit / mono (Nova Sonic output format). Text frames carry JSON control messages:
 
@@ -457,8 +457,8 @@ Server → Client:
 
 Per-stream input grammar *(Req 2.1)*:
 
-1. `sessionStart` — inference configuration.
-2. `promptStart` — `promptName`, audio output configuration (24 kHz speech), `toolConfiguration` containing the `ask_devops_agent` tool spec *(Req 3.1)*:
+1. `sessionStart`: inference configuration.
+2. `promptStart`: `promptName`, audio output configuration (24 kHz speech), `toolConfiguration` containing the `ask_devops_agent` tool spec *(Req 3.1)*:
 
 ```json
 {
@@ -524,9 +524,9 @@ Startup validation: required-key manifest checked before serving; missing key �
 
 ## Correctness Properties
 
-*A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
+*A property is a characteristic or behavior that should hold true across all valid executions of a system: essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
-Properties below target the pure domain logic (isolated behind ports, so all are testable with fakes — no AWS calls). Infrastructure-configuration criteria (WAF, TLS policies, pipeline wiring, table existence) are intentionally **not** properties; they are covered by Terraform plan assertions and integration/smoke tests in the Testing Strategy.
+Properties below target the pure domain logic (isolated behind ports, so all are testable with fakes: no AWS calls). Infrastructure-configuration criteria (WAF, TLS policies, pipeline wiring, table existence) are intentionally **not** properties; they are covered by Terraform plan assertions and integration/smoke tests in the Testing Strategy.
 
 ### Property 1: PCM conversion preserves audio structure
 
@@ -566,7 +566,7 @@ Properties below target the pure domain logic (isolated behind ports, so all are
 
 ### Property 7: Guardrail gate is fail-closed
 
-*For any* guardrail evaluation outcome — pass, intervention, any Automated Reasoning finding type (valid, invalid, satisfiable, impossible, ambiguous, untranslatable), SDK exception, timeout, or malformed response — the tool router SHALL forward the request to the DevOps_Agent if and only if the outcome is an explicit pass with no non-compliant finding; in every other case it SHALL return a refusal tool result (stating only read/diagnostic operations are supported) without any DevOps_Agent call, and SHALL emit an audit record containing the blocked content, Voice_Session identifier, engineer identity, and timestamp.
+*For any* guardrail evaluation outcome (pass, intervention, any Automated Reasoning finding type (valid, invalid, satisfiable, impossible, ambiguous, untranslatable), SDK exception, timeout, or malformed response), the tool router SHALL forward the request to the DevOps_Agent if and only if the outcome is an explicit pass with no non-compliant finding; in every other case it SHALL return a refusal tool result (stating only read/diagnostic operations are supported) without any DevOps_Agent call, and SHALL emit an audit record containing the blocked content, Voice_Session identifier, engineer identity, and timestamp.
 
 **Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7**
 
@@ -584,7 +584,7 @@ Properties below target the pure domain logic (isolated behind ports, so all are
 
 ### Property 10: WebSocket authentication accepts only fully valid tokens
 
-*For any* WebSocket handshake token — a validly signed unexpired Cognito JWT, or any mutation of one (altered signature, expired, wrong issuer, wrong audience, malformed, or absent) — the Voice_Service SHALL accept the connection and create a Voice_Session if and only if the token is fully valid, and on rejection SHALL create no session and process no audio.
+*For any* WebSocket handshake token (a validly signed unexpired Cognito JWT, or any mutation of one (altered signature, expired, wrong issuer, wrong audience, malformed, or absent)), the Voice_Service SHALL accept the connection and create a Voice_Session if and only if the token is fully valid, and on rejection SHALL create no session and process no audio.
 
 **Validates: Requirements 7.2, 7.3, 12.5, 12.6**
 
@@ -626,7 +626,7 @@ Properties below target the pure domain logic (isolated behind ports, so all are
 
 ### Property 17: Task protection tracks live sessions
 
-*For any* interleaving of Voice_Session starts and ends on a task, scale-in protection SHALL be enabled whenever the live-session count is greater than zero, and SHALL be released (within the 60-second bound, under a fake clock) when the count returns to zero — so a task hosting live sessions is never scale-in eligible and an idle task always becomes eligible.
+*For any* interleaving of Voice_Session starts and ends on a task, scale-in protection SHALL be enabled whenever the live-session count is greater than zero, and SHALL be released (within the 60-second bound, under a fake clock) when the count returns to zero, so a task hosting live sessions is never scale-in eligible and an idle task always becomes eligible.
 
 **Validates: Requirements 10.3, 10.4, 19.6, 19.7**
 
@@ -652,7 +652,7 @@ Properties below target the pure domain logic (isolated behind ports, so all are
 
 ### Exception Hierarchy
 
-All raised exceptions are specific subclasses of `PortalError`; bare `Exception` is never raised, and only top-level boundary handlers (WS connection handler, Lambda entrypoint, FastAPI exception middleware) may catch broadly to convert unhandled errors into error frames/responses — enforced by lint *(Req 17.4, 17.5)*.
+All raised exceptions are specific subclasses of `PortalError`; bare `Exception` is never raised, and only top-level boundary handlers (WS connection handler, Lambda entrypoint, FastAPI exception middleware) may catch broadly to convert unhandled errors into error frames/responses: enforced by lint *(Req 17.4, 17.5)*.
 
 ```
 PortalError
@@ -694,17 +694,17 @@ PortalError
 | Chime playback blocked | popup still shown, notification never suppressed | popup without sound *(Req 5.4)* |
 | SIGTERM drain expiry with live session | `session.terminating` frame before close | notified close *(Req 10.8)* |
 
-Retry policy: shared `retry.py` helper — up to 3 retries (4 attempts), exponential backoff with jitter (0.2 s / 0.8 s / 2 s), retries only on retryable error classes, logs each failure and a distinct exhaustion record with the specific exception class *(Property 14)*. Notifier channels (AppSync, Web Push, SNS) run concurrently and independently: one channel's failure never suppresses the others.
+Retry policy: shared `retry.py` helper: up to 3 retries (4 attempts), exponential backoff with jitter (0.2 s / 0.8 s / 2 s), retries only on retryable error classes, logs each failure and a distinct exhaustion record with the specific exception class *(Property 14)*. Notifier channels (AppSync, Web Push, SNS) run concurrently and independently: one channel's failure never suppresses the others.
 
 ## Testing Strategy
 
 ### Property-Based Tests (backend: hypothesis, frontend: fast-check)
 
-- Backend: `hypothesis` with `pytest`/`pytest-asyncio`; frontend: `fast-check` with `vitest`. Property-based testing libraries are used as-is — never hand-rolled.
+- Backend: `hypothesis` with `pytest`/`pytest-asyncio`; frontend: `fast-check` with `vitest`. Property-based testing libraries are used as-is: never hand-rolled.
 - Every property test runs **at least 100 iterations** (`settings(max_examples=100)` / `fc.assert(..., {numRuns: 100})`).
 - One property-based test per design property, tagged with a comment in the format:
   `# Feature: nova-sonic-support-portal, Property 7: Guardrail gate is fail-closed`
-- All properties execute against in-memory fakes of the port interfaces (`FakeBedrockStream`, `FakeDevOpsAgent`, `FakeSessionStore`, `FakeTaskProtection`, `FakeClock`) — no AWS access, fast and deterministic.
+- All properties execute against in-memory fakes of the port interfaces (`FakeBedrockStream`, `FakeDevOpsAgent`, `FakeSessionStore`, `FakeTaskProtection`, `FakeClock`): no AWS access, fast and deterministic.
 
 ### Unit Tests (examples and edge cases)
 
@@ -727,7 +727,7 @@ pytest + pytest-asyncio (backend), vitest + jsdom (frontend). Focused example te
 
 ### Quality Gates (pipeline stage 2 alongside unit tests)
 
-`ruff` (pydocstyle `D`, `ASYNC`, `BLE`, `TRY` rule groups), `mypy --strict`, `interrogate --fail-under=100` (docstring coverage), `import-linter` (SDK imports confined to `adapters/`) — any violation fails the build *(Req 17.1–17.7)*. Frontend: `eslint` + `jsdoc` rules.
+`ruff` (pydocstyle `D`, `ASYNC`, `BLE`, `TRY` rule groups), `mypy --strict`, `interrogate --fail-under=100` (docstring coverage), `import-linter` (SDK imports confined to `adapters/`): any violation fails the build *(Req 17.1–17.7)*. Frontend: `eslint` + `jsdoc` rules.
 
 ### Integration and Smoke Tests (post-deploy)
 
@@ -735,7 +735,7 @@ Live-guardrail canonical destructive utterances blocked *(4.2)*; AppSync Events 
 
 ### What is deliberately NOT property-tested
 
-IaC resources, WAF/ALB/CloudFront behavior, AWS-managed semantics (autoscaling actions, CodePipeline gating, CloudWatch→SNS delivery), UI look-and-feel, and latency bounds — these are configuration or external-service behavior where 100 random iterations add nothing over plan assertions, examples, and smoke tests.
+IaC resources, WAF/ALB/CloudFront behavior, AWS-managed semantics (autoscaling actions, CodePipeline gating, CloudWatch→SNS delivery), UI look-and-feel, and latency bounds: these are configuration or external-service behavior where 100 random iterations add nothing over plan assertions, examples, and smoke tests.
 
 ## Well-Architected Alignment *(Req 19.1)*
 
@@ -763,12 +763,12 @@ Inline *(Req X.Y)* annotations throughout this document map design elements to a
 | 8 Session persistence | DynamoDB table designs, write discipline, reconnect flow, ttl.py | P11, P12, P13 |
 | 9 Responsive frontend | Frontend module structure, capability gate, status badge, config.json | P18, P20 |
 | 10 Scalability/availability | ecs_service module, task protection manager, drain_manager | P14, P17 |
-| 11 WAF | waf module (2 scopes, managed rules, block, logging) | — (plan assertions + smoke) |
+| 11 WAF | waf module (2 scopes, managed rules, block, logging) | None (plan assertions + smoke) |
 | 12 Encryption | cloudfront_s3 module, TLS bucket policies, adapter TLS endpoints | P10 (auth on HTTP listener) |
-| 13 S3/ALB hardening | alb + s3_policies modules, access_logging_bucket_name validation | — (plan assertions) |
+| 13 S3/ALB hardening | alb + s3_policies modules, access_logging_bucket_name validation | None (plan assertions) |
 | 14 Secrets/config | config.py, Secret wrapper, configuration model, gitleaks gate | P15, P16 |
-| 15 Terraform two layers | Terraform structure (bootstrap/app, separate state, variables) | — (plan assertions) |
-| 16 CI/CD pipelines | Bootstrap pipeline module, stage gating, S3-source design, buildspecs | — (plan assertions + integration) |
-| 17 Code quality | Module structure (ports/adapters), exception hierarchy, quality gates | — (lint gates) |
-| 18 Structure/docs | Repository deliverables (README, steering, hooks) | — (CI checks) |
+| 15 Terraform two layers | Terraform structure (bootstrap/app, separate state, variables) | None (plan assertions) |
+| 16 CI/CD pipelines | Bootstrap pipeline module, stage gating, S3-source design, buildspecs | None (plan assertions + integration) |
+| 17 Code quality | Module structure (ports/adapters), exception hierarchy, quality gates | None (lint gates) |
+| 18 Structure/docs | Repository deliverables (README, steering, hooks) | None (CI checks) |
 | 19 Well-Architected/observability | WA table, observability module, logging.py, protection invariant | P17, P19 |

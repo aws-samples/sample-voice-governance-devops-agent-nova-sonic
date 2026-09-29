@@ -21,14 +21,14 @@ Standards for all Python code under `backend/`: the Voice_Service (`backend/voic
 ## Errors and Exceptions
 
 - Raise only specific exception classes from the `PortalError` hierarchy (`backend/shared/exceptions.py`, extended in `backend/voice_service/app/exceptions.py`): ConfigurationError, AuthenticationError (TokenInvalidError / TokenExpiredError), BedrockStreamError (StreamOpenError / SegmentationError), DevOpsAgentError (AgentRequestError / AgentTimeoutError), GuardrailUnavailableError, SessionStoreError, NotificationPublishError, WebPushError (SubscriptionGoneError / PushDeliveryError), TaskProtectionError.
-- Never raise bare or generic `Exception`. Never catch bare `Exception` — the only exceptions are top-level boundary handlers (WebSocket connection handler, FastAPI exception middleware, Lambda entrypoint) that convert unhandled errors into error frames or responses.
+- Never raise bare or generic `Exception`. Never catch bare `Exception`: the only exceptions are top-level boundary handlers (WebSocket connection handler, FastAPI exception middleware, Lambda entrypoint) that convert unhandled errors into error frames or responses.
 - Use the shared bounded retry helper (`backend/shared/retry.py`) for retryable operations: at most 3 retries (4 attempts), exponential backoff with jitter (0.2 s / 0.8 s / 2 s), a log entry per failure, and a distinct exhaustion record naming the specific exception class.
 
 ## Architecture (SOLID ports and adapters)
 
 - `domain/` holds pure logic only: no I/O, no SDK imports, fully unit- and property-testable.
 - `ports/` holds abstract base classes (interfaces) that domain and orchestration code depend on.
-- `adapters/` is the only place AWS SDKs (`boto3`, `aioboto3`, `botocore`) may be imported — enforced by an import-linter contract.
+- `adapters/` is the only place AWS SDKs (`boto3`, `aioboto3`, `botocore`) may be imported: enforced by an import-linter contract.
 - Structure each module around a single responsibility. Reach external dependencies (Bedrock, DevOps Agent, DynamoDB, ECS agent) only through their port interfaces.
 
 ## Configuration and Secrets
@@ -54,5 +54,5 @@ Standards for all Python code under `backend/`: the Voice_Service (`backend/voic
 ## Testing
 
 - Property-based tests use `hypothesis` with `settings(max_examples=100)` or more, live under `tests/property/`, and carry the tag comment `# Feature: nova-sonic-support-portal, Property N: <name>`.
-- All tests run against the in-memory fakes in `backend/voice_service/tests/fakes.py` (FakeBedrockStream, FakeDevOpsAgent, FakeGuardrail, FakeSessionStore, FakeTaskProtection, FakeClock) — no AWS access, no mocking of SDK internals.
+- All tests run against the in-memory fakes in `backend/voice_service/tests/fakes.py` (FakeBedrockStream, FakeDevOpsAgent, FakeGuardrail, FakeSessionStore, FakeTaskProtection, FakeClock): no AWS access, no mocking of SDK internals.
 - Unit tests cover the branch-specific edge cases (failure paths, timeouts, boundary timings) alongside the property suites.
