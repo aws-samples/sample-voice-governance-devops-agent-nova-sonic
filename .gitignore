@@ -141,3 +141,6 @@ desktop.ini
 *.njsproj
 *.sln
 *.swp
+
+# Local capture of app-layer outputs (README clean-up step)
+app-outputs.json

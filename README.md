@@ -636,6 +636,85 @@ If you would rather rotate in one local step without the pipeline review, run `t
 
 **Scaling knobs** (`infrastructure/app/variables.tf`): `max_capacity` (default 10), `scale_out_threshold` (default 80) and `scale_in_threshold` (default 20) on ALB `ActiveConnectionCount`. The floor is fixed at 2 tasks across 2+ AZs, and scale-in never terminates a task holding live voice sessions (ECS task scale-in protection).
 
+## Clean up
+
+The deployment creates billable resources, including Fargate tasks, NAT gateways, an ALB, and a CloudFront distribution. Several resources carry deletion protection and several buckets are versioned, so `terraform destroy` fails until you complete the preparation steps. Tear down the app layer first, then the bootstrap layer, because the bootstrap layer holds the app layer's remote state.
+
+Set the variables used below (from the repo root):
+
+```bash
+export PROJECT=<project> ENVIRONMENT=<env> AWS_REGION=us-east-1
+scripts/deploy.sh outputs --project "$PROJECT" --environment "$ENVIRONMENT" > app-outputs.json
+```
+
+**1. Remove the Agent Space association.** Find the association for this account and disassociate it:
+
+```bash
+aws devops-agent list-associations --region us-east-1 --agent-space-id "$DEVOPS_AGENT_SPACE_ID" \
+  --query 'associations[].[associationId,configuration]'
+aws devops-agent disassociate-service --region us-east-1 \
+  --agent-space-id "$DEVOPS_AGENT_SPACE_ID" --association-id <association-id>
+```
+
+**2. Turn off deletion protection in the app layer.**
+
+```bash
+# ALB
+ALB_ARN=$(aws elbv2 describe-load-balancers --region us-east-1 --names "${ENVIRONMENT}-voice-alb" \
+  --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+aws elbv2 modify-load-balancer-attributes --region us-east-1 --load-balancer-arn "$ALB_ARN" \
+  --attributes Key=deletion_protection.enabled,Value=false
+
+# The four DynamoDB tables
+for t in $(jq -r '.dynamodb_table_names.value[]' app-outputs.json); do
+  aws dynamodb update-table --region us-east-1 --table-name "$t" --no-deletion-protection-enabled
+done
+```
+
+For the Cognito user pool (`cognito_user_pool_id` in `app-outputs.json`), turn off deletion protection in the Amazon Cognito console under **Settings**. Do not use `aws cognito-idp update-user-pool` for this, because that call resets every setting you omit to its default.
+
+**3. Empty the frontend bucket.** Open the bucket named by `frontend_bucket_name` in the Amazon S3 console and choose **Empty**, which removes all object versions.
+
+**4. Destroy the app layer.** Run it locally against the remote state. Read the state bucket and lock table names from the bootstrap layer, and pass any existing zip file as `lambda_zip_path`: Terraform reads its hash while planning the destroy, but nothing is uploaded.
+
+```bash
+STATE_BUCKET=$(terraform -chdir=infrastructure/bootstrap output -raw state_bucket_name)
+LOCK_TABLE=$(terraform -chdir=infrastructure/bootstrap output -raw lock_table_name)
+cd infrastructure/app
+terraform init -backend-config="bucket=${STATE_BUCKET}" -backend-config="key=app/terraform.tfstate" \
+  -backend-config="region=us-east-1" -backend-config="dynamodb_table=${LOCK_TABLE}"
+zip -j "$TMPDIR/notifier-placeholder.zip" ../../README.md
+terraform destroy -var-file="envs/${ENVIRONMENT}.tfvars" -var "lambda_zip_path=$TMPDIR/notifier-placeholder.zip"
+cd -
+```
+
+Deleting the CloudFront distribution and its AWS WAF web ACL can take 15 minutes or more.
+
+**5. Prepare the bootstrap layer.**
+
+- Empty the state, artifact, and three source buckets (`state_bucket_name`, `artifact_bucket_name`, `source_bucket_names` in `terraform -chdir=infrastructure/bootstrap output`) with **Empty** in the Amazon S3 console. They are versioned, and the state bucket still holds the app layer's state history.
+- Delete the images in the ECR repository (`ecr_repository_url`) from the Amazon ECR console. The repository does not force-delete images.
+- Turn off deletion protection on the lock table:
+
+```bash
+aws dynamodb update-table --region us-east-1 --table-name "$LOCK_TABLE" --no-deletion-protection-enabled
+```
+
+**6. Destroy the bootstrap layer** with the same variables you applied it with:
+
+```bash
+cd infrastructure/bootstrap
+terraform destroy -var "project_name=${PROJECT}" -var "environment=${ENVIRONMENT}" -var "aws_region=us-east-1"
+cd -
+```
+
+**7. Remove what Terraform does not own.**
+
+- The VAPID private key parameter (`/<env>/notifier/vapid-private-key` by default). All three VAPID options create it outside Terraform state: `aws ssm delete-parameter --region us-east-1 --name "/${ENVIRONMENT}/notifier/vapid-private-key"`.
+- The ALB access-logging bucket, if you created it in step 0d for this deployment only.
+- The Agent Space, if you created it only for this sample.
+- The local files `app-outputs.json`, `infrastructure/bootstrap/terraform.tfstate`, and its backup, which contain resource ARNs.
+
 ## Further reading
 
 - `infrastructure/bootstrap/variables.tf`, `infrastructure/app/variables.tf`: every input variable with validation rules
