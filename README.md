@@ -4,6 +4,11 @@ A voice-driven AWS support portal for DevOps engineers. An engineer speaks into 
 
 The portal also pushes incident notifications: EventBridge events (CloudWatch Alarms, Incident Manager, DevOps Agent findings) drive a Notifier Lambda that fans out to an AppSync Events channel (in-app popup + chime) and to Web Push subscriptions (browser closed), with optional SNS escalation. Voice sessions survive Bedrock's 8-minute stream cap through session segmentation with context replay, and survive disconnects through reconnect with transcript restore from DynamoDB.
 
+
+# Contributors
+
+Anand Krishna Varanasi and T.V.R.L.Phani Kumar Dadi
+
 ## Architecture
 
 ```mermaid
