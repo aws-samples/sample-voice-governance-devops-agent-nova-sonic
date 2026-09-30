@@ -7,7 +7,7 @@ The portal also pushes incident notifications: EventBridge events (CloudWatch Al
 
 # Contributors
 
-Anand Krishna Varanasi and T.V.R.L.Phani Kumar Dadi
+T.V.R.L.Phani Kumar Dadi and Anand Krishna Varanasi
 
 ## Architecture
 
