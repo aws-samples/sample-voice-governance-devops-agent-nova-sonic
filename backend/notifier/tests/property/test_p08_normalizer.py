@@ -381,8 +381,8 @@ def _iso_moments(draw: st.DrawFn) -> tuple[str, datetime]:
             # st.datetimes() requires NAIVE bounds by contract (the strategy
             # attaches timezones itself); the offset is applied explicitly
             # below, so these literals are deliberately tzinfo-free.
-            min_value=datetime(1902, 1, 1),  # noqa: DTZ001
-            max_value=datetime(2199, 12, 31),  # noqa: DTZ001
+            min_value=datetime(1902, 1, 1),
+            max_value=datetime(2199, 12, 31),
         )
     )
     offset_minutes = draw(st.one_of(st.none(), st.integers(-1439, 1439)))

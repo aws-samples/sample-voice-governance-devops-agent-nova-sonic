@@ -23,7 +23,10 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — builder: resolve third-party dependencies into /opt/venv
 # ---------------------------------------------------------------------------
-FROM python:3.14-slim AS builder
+# Base images come from the ECR Public mirror of the Docker Official Images
+# (same image as docker.io/library/python). Docker Hub rate-limits anonymous
+# pulls per IP, and CodeBuild's shared egress IPs hit that limit (HTTP 429).
+FROM public.ecr.aws/docker/library/python:3.14-slim AS builder
 
 # Outstanding Debian security updates (see the runtime stage for the
 # rationale). Applied here too so any native wheel resolved below is built
@@ -65,7 +68,7 @@ RUN pip install --no-cache-dir ./voice_service \
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime
 # ---------------------------------------------------------------------------
-FROM python:3.14-slim
+FROM public.ecr.aws/docker/library/python:3.14-slim
 
 # Apply the base image's outstanding Debian security updates (Req 12.3).
 #

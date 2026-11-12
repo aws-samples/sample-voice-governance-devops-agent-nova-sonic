@@ -39,10 +39,24 @@ locals {
   parameter_name = coalesce(var.parameter_name_override, "/${var.environment}/notifier/vapid-private-key")
 }
 
-# Create-if-absent: generates and stores the key on first apply, and is a
-# read-only no-op on every subsequent apply (returns the recorded public
-# key). The program never returns the private key, so nothing sensitive is
-# recorded in state.
+# Create-if-absent: generates and stores the key on the first evaluation
+# of this data source — which may be a plan, not just an apply, see the
+# PLAN-TIME SIDE EFFECT note below — and is a read-only no-op on every
+# evaluation after that (returns the recorded public key). The program
+# never returns the private key, so nothing sensitive is recorded in state.
+#
+# PLAN-TIME SIDE EFFECT — read this before enabling the module. Terraform
+# evaluates data sources during `terraform plan`, not only during apply,
+# so whenever this module is instantiated (create_vapid_key = true) a mere
+# plan will create the SSM parameter if it is absent. That is why
+# create_vapid_key defaults to false: with the default the module is not
+# instantiated at all and a bootstrap plan stays completely read-only.
+# Creation remains strictly create-if-absent in every case — vapid-ensure.sh
+# calls put-parameter WITHOUT --overwrite, so neither a plan nor an apply
+# can overwrite or regenerate a key that already exists. For a guaranteed
+# no-side-effect plan, leave create_vapid_key unset and provision the key
+# separately; see the README "VAPID key pair (Web Push)" section for those
+# alternatives.
 data "external" "vapid" {
   program = ["bash", "${path.module}/vapid-ensure.sh"]
 
