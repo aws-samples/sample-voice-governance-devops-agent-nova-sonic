@@ -110,6 +110,7 @@ Each pipeline runs **Source → SecurityScan → UnitTest → BuildAndPlan → M
 | AWS account in **us-east-1** that can invoke Amazon Nova 2 Sonic | `amazon.nova-2-sonic-v1:0`. Amazon Bedrock serverless models are available by default; make sure no IAM policy or SCP denies it (step 0b). The reference implementation deploys in us-east-1 because the CloudFront-scope AWS WAF web ACL must live there |
 | An AWS DevOps Agent Agent Space | You need its **space id** (`devops_agent_space_id` variable). See [Creating an Agent Space](https://docs.aws.amazon.com/devopsagent/latest/userguide/getting-started-with-aws-devops-agent-creating-an-agent-space.html) |
 | Pre-existing S3 access-logging bucket | Receives ALB access logs. The stack only references it (`access_logging_bucket_name`) and **never creates it** |
+| VPC Block Public Access must not block internet gateway traffic | Account-level, per-Region AWS setting. This stack needs the internet gateway in **both** directions: inbound to an internet-facing ALB and outbound through NAT for the Fargate tasks, so a blocking mode fails the deploy unless the stack's VPC is excluded. Check and remediate per [step 0e](#0-one-time-account-prerequisites-not-done-by-deploysh) |
 | Terraform >= 1.9 | Pipelines pin 1.9.8 |
 | AWS CLI v2 | Credentials able to apply the bootstrap layer and upload source archives |
 | Docker | Only needed if building the voice-service image locally; the backend pipeline builds in CodeBuild |
@@ -121,7 +122,13 @@ Each pipeline runs **Source → SecurityScan → UnitTest → BuildAndPlan → M
 
 The Notifier signs Web Push messages with a VAPID (RFC 8292) ECDSA P-256 key pair. The **private key** is stored as an SSM SecureString and referenced by name only (`vapid_private_key_parameter_name`), so it never appears in source or Terraform state. The **public key** (`vapid_public_key`) is not sensitive and is published to browsers via `config.json`. The key must exist **before the first app-layer deploy**, and, critically, **must never be regenerated once browsers have subscribed**: a new key pair invalidates every existing push subscription. All three options below are therefore strictly *create-if-absent*.
 
-**Option A, Terraform-native (recommended).** The bootstrap layer's `vapid` module generates the pair if absent, stores the private key as an SSM SecureString, and exports the public key. It all runs inside `terraform apply`, with no key material in Terraform state (an `external` data source returns only the public key). Enable it with `create_vapid_key=true`, or via the orchestrator:
+> **Heads-up: with Option A, `terraform plan` creates the key too, not just `terraform apply`.** The `vapid` module obtains the public key from an `external` data source, and Terraform evaluates data sources **during plan**. So when `create_vapid_key = true`, a bootstrap plan run "just to look" will itself create `/<env>/notifier/vapid-private-key` if that parameter does not yet exist. No apply is needed for the key to appear.
+>
+> `create_vapid_key` **defaults to `false`**, and with the default the module is not instantiated at all, so a bootstrap plan is completely read-only. For a guaranteed no-side-effect plan, leave `create_vapid_key` unset (omit both `-var "create_vapid_key=true"` and `deploy.sh`'s `--with-vapid` flag) and provision the key separately with **Option B** or **Option C** below.
+>
+> Either way, creation stays strictly *create-if-absent*: the helper calls `aws ssm put-parameter` **without** `--overwrite`, so neither a plan nor an apply can overwrite or regenerate a key that already exists.
+
+**Option A, Terraform-native (recommended).** The bootstrap layer's `vapid` module generates the pair if absent, stores the private key as an SSM SecureString, and exports the public key. It all runs inside Terraform, with no key material in Terraform state (an `external` data source returns only the public key). Enable it with `create_vapid_key=true` (noting the plan-time caveat above), or via the orchestrator:
 
 ```bash
 scripts/deploy.sh bootstrap --project <project> --environment <env> \
@@ -271,6 +278,39 @@ aws s3api put-bucket-policy --bucket "$LOG_BUCKET" --policy "{
 
 > The ELB access-log delivery permission is region-specific; if you create a fresh bucket, also grant the regional ELB log-delivery principal `s3:PutObject` on `arn:aws:s3:::$LOG_BUCKET/*`. See the [ALB access logging docs](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html). Reusing your org's standard logging bucket avoids this.
 
+**0e. Confirm VPC Block Public Access is not blocking internet gateway traffic** (account-level, per Region). [VPC Block Public Access](https://docs.aws.amazon.com/vpc/latest/userguide/security-vpc-bpa.html) (BPA) is an AWS account setting that centrally blocks VPC traffic through internet gateways. Any AWS account can have it enabled, so check the mode in your target Region before deploying:
+
+```bash
+aws ec2 describe-vpc-block-public-access-options --region "$AWS_REGION" \
+  --query 'VpcBlockPublicAccessOptions.[InternetGatewayBlockMode,ManagedBy,ExclusionsAllowed]' \
+  --output text
+# off ................ what this stack needs
+# block-bidirectional | block-ingress ... will break the deploy (see below)
+
+# Which VPCs/subnets are already exempt from the account's BPA mode:
+aws ec2 describe-vpc-block-public-access-exclusions --region "$AWS_REGION"
+```
+
+**Why it breaks this stack.** Both halves of the data path cross the internet gateway. The ALB is internet-facing (`internal = false`) in the public subnets and CloudFront reaches it as a *custom origin over the public internet*, so inbound internet gateway traffic is required. The Fargate tasks sit in private subnets and reach Bedrock, AppSync, and DynamoDB through the NAT gateways, so outbound internet gateway traffic is required too. Per the [VPC BPA service-impact list](https://docs.aws.amazon.com/vpc/latest/userguide/security-vpc-bpa-basics.html), `block-bidirectional` blocks internet gateways, NAT gateways, and internet-facing Application Load Balancers, so this stack then fails in both directions. `block-ingress` still permits NAT egress, but it blocks the inbound CloudFront→ALB hop, leaving the portal with no reachable origin.
+
+**Remediation.** Either exempt this stack's VPC, or turn the mode off for the Region:
+
+```bash
+# (a) Exclude the stack's VPC. A VPC exclusion automatically covers all of its subnets,
+#     which is what an internet-facing load balancer needs. Excluding only SOME of a
+#     load balancer's subnets leaves a partial, confusing posture. Max 50 per account.
+aws ec2 create-vpc-block-public-access-exclusion --region "$AWS_REGION" \
+  --vpc-id <vpc-id> --internet-gateway-exclusion-mode allow-bidirectional
+
+# (b) Or turn the account/Region setting off.
+aws ec2 modify-vpc-block-public-access-options --region "$AWS_REGION" \
+  --internet-gateway-block-mode off
+```
+
+Route (a) has an ordering wrinkle worth knowing up front: the VPC is created by the **app layer**, so on a first-time deployment there is no `<vpc-id>` to exclude yet. Either set the mode to `off` before deploying, or let the first IaC pipeline run create the VPC, then add the exclusion and re-run the pipeline.
+
+> **Caution:** this is an account-level network guardrail, and changing it may be governed by your organization rather than by you. If an AWS Organizations declarative policy manages the setting, the `describe` command above reports `ManagedBy` as `declarative-policy`, the account cannot change the mode locally, and that policy also governs whether exclusions are permitted at all (`ExclusionsAllowed`). In that case the account owner or your organization's administrator has to act. Either route re-opens internet reachability that the guardrail was put in place to prevent, so review that exposure before changing anything.
+
 #### 1. Bootstrap the CI/CD foundation and generate the VAPID key
 
 One command creates the pipelines/buckets/ECR/state backend **and** generates+stores the VAPID key (private key → SSM SecureString; only the public key leaves Terraform):
@@ -312,6 +352,8 @@ git commit -m "chore: add ${ENVIRONMENT} app-layer tfvars"
 ```
 
 > `cognito_domain_prefix` must be globally unique within the region; if the app apply later fails claiming the domain is taken, pick another prefix, re-commit, and re-run step 3.
+
+> The IaC pipeline accepts exactly one file in `infrastructure/app/envs/`. The repository ships `envs/dev.tfvars` as a template, so if `ENVIRONMENT` is anything other than `dev`, remove it in the same commit (`git rm infrastructure/app/envs/dev.tfvars`). Otherwise BuildAndPlan stops with `ERROR: multiple envs/*.tfvars files in the archive`.
 
 #### 3. Deploy the app layer (IaC pipeline)
 

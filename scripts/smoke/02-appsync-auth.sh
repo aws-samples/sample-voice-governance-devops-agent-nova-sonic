@@ -10,8 +10,9 @@
 # curl against the Events API realtime endpoint and asserts the HTTP
 # status difference between unauthorized and authorized attempts.
 #   - WITHOUT a token (bare `aws-appsync-event-ws` subprotocol, no
-#     `header-` auth piece): expect rejection — any non-101 HTTP status
-#     (401/403/4xx) or handshake failure.
+#     `header-` auth piece): expect rejection — a non-101 HTTP status, or
+#     (what AppSync Events actually does) 101 followed by a
+#     `connection_error` frame such as "Required headers are missing".
 #   - WITH a valid Cognito token (ID or access token via $COGNITO_TOKEN):
 #     expect 101 Switching Protocols. Auth rides in the subprotocol list
 #     as `header-<base64url({"Authorization": token, "host": <http-dns>})>`
@@ -67,29 +68,48 @@ fi
 ws_handshake_status() {
   local subprotocol=$1 headers_file status
   headers_file=$(mktemp)
+  # Pipe through cat into the file, not -o: with -o curl drops the in-band
+  # frame that follows the 101 when the transfer ends.
   status=$(curl -s --include --no-buffer --http1.1 --max-time 15 \
-    -o "$headers_file" -w '%{http_code}' \
+    -w '\n%{http_code}' \
     -H "Connection: Upgrade" \
     -H "Upgrade: websocket" \
     -H "Sec-WebSocket-Version: 13" \
     -H "Sec-WebSocket-Key: $WS_KEY" \
     -H "Sec-WebSocket-Protocol: $subprotocol" \
-    "$REALTIME_HTTPS_URL" 2>/dev/null) || true
+    "$REALTIME_HTTPS_URL" 2>/dev/null | cat > "$headers_file"; tail -n 1 "$headers_file") || true
+  status=${status:-000}
   # A timed-out-but-upgraded connection may report 000 via -w while the
   # 101 status line already arrived; fall back to the captured headers.
   if [[ "$status" == "000" ]] && grep -q " 101" "$headers_file" 2>/dev/null; then
     status="101"
+  fi
+  # AppSync Events completes the upgrade even for an unauthorized client
+  # and then rejects it in-band with a `connection_error` frame, so record
+  # whether one arrived (the frame lands in the same capture file).
+  WS_CONNECTION_ERROR=0
+  # LC_ALL=C: the WebSocket frame header bytes are not valid UTF-8, and a
+  # UTF-8 locale grep can miss the JSON payload after them.
+  if LC_ALL=C grep -aq '"type":"connection_error"' "$headers_file" 2>/dev/null; then
+    WS_CONNECTION_ERROR=1
   fi
   rm -f "$headers_file"
   printf '%s' "$status"
 }
 
 # --- Unauthorized: no auth subprotocol piece → must be rejected. -----------
-status=$(ws_handshake_status "aws-appsync-event-ws")
-if [[ "$status" == "101" ]]; then
-  fail "unauthorized handshake was ACCEPTED (HTTP 101) — expected rejection"
+# Rejection is either a non-101 status or, as AppSync Events actually
+# behaves, a 101 followed by a `connection_error` frame. The status is
+# captured through a temp file (not $(...)) so WS_CONNECTION_ERROR survives.
+status_file=$(mktemp)
+ws_handshake_status "aws-appsync-event-ws" > "$status_file"
+status=$(cat "$status_file"); rm -f "$status_file"
+if [[ "$status" != "101" ]]; then
+  pass "unauthorized handshake rejected (HTTP $status)"
+elif [[ "$WS_CONNECTION_ERROR" -eq 1 ]]; then
+  pass "unauthorized connection rejected in-band (HTTP 101, then connection_error)"
 else
-  pass "unauthorized handshake rejected (HTTP $status, expected non-101)"
+  fail "unauthorized handshake was ACCEPTED (HTTP 101, no connection_error) — expected rejection"
 fi
 
 # --- Authorized: Cognito token in the header- subprotocol → must upgrade. --

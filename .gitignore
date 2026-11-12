@@ -6,6 +6,9 @@ ash_output
 # Local .terraform directories containing architecture-specific binaries
 .terraform/
 
+# Kiro IDE specs and steering (local tooling, not part of the sample)
+.kiro/
+
 # Distributed state files (can contain secrets/passwords in plain text)
 *.tfstate
 *.tfstate.*
@@ -144,3 +147,13 @@ desktop.ini
 
 # Local capture of app-layer outputs (README clean-up step)
 app-outputs.json
+
+# ==========================================
+# LOCAL AGENT / ASSISTANT WORKING NOTES
+# ==========================================
+# Scratch notes a coding assistant writes about this repository - plans,
+# review write-ups, verification logs. They are working material ABOUT the
+# code rather than part of it, and they quote review and tooling output
+# verbatim, so ignoring the directory stops a stray `git add -A` from
+# sweeping that material into this repository's published history.
+.agents/

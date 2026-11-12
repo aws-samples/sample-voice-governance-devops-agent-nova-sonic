@@ -14,9 +14,53 @@
 #     exception is the Terraform-managed origin-verify SSM parameter,
 #     which refresh must read for the saved plan to apply unchanged;
 #     external secrets such as the VAPID private key stay unreadable.
-#   * ec2:GetManagedPrefixListEntries is NOT covered by ec2:Describe*
-#     (Get-prefixed) yet is required to refresh the CloudFront
-#     origin-facing prefix list the ALB security group references.
+#   * Two EC2 reads are Get-prefixed, so ec2:Describe* does NOT match
+#     them and each must be named explicitly:
+#       - ec2:GetManagedPrefixListEntries, required to refresh the
+#         CloudFront origin-facing prefix list the ALB security group
+#         references.
+#       - ec2:GetSecurityGroupsForVpc, which Elastic Load Balancing calls
+#         with the CALLER's credentials whenever a load balancer is
+#         created or modified with security groups. Without it the ALB in
+#         infrastructure/app/modules/alb cannot be applied and the Deploy
+#         stage fails with a plain "not authorized" error (no SCP
+#         involved). AWS grants it in the same statement as ec2:Describe*
+#         in its own AmazonEC2ReadOnlyAccess, and lists it next to
+#         ec2:DescribeSecurityGroups in ElasticLoadBalancingFullAccess.
+#   * The rest of the read surface was audited for that same trap under
+#     EVERY prefix a Describe* wildcard misses — Get*, List* and Validate*,
+#     not just Get* — and is complete, so do not broaden it speculatively:
+#     services carrying blanket Get*/List* have no gap by construction,
+#     and for the Describe*-only services every remaining candidate is
+#     either a data-plane read this document deliberately withholds
+#     (cloudwatch:GetMetricData, dynamodb:GetItem) or an action for a
+#     resource the app layer never provisions (kms:GetKeyPolicy — no
+#     customer-managed keys; ec2:GetSubnetCidrReservations — no CIDR
+#     reservations; application-autoscaling:GetPredictiveScalingForecast —
+#     the ECS service scales on target tracking only).
+#     That completeness holds for the app layer's CURRENT resource
+#     inventory, not for all time: several rejections above hold only
+#     because the resource is not provisioned today. RE-RUN THIS AUDIT
+#     whenever the app layer gains a resource type, checking the new
+#     service's non-Describe* read actions. The trap is easy to
+#     reproduce — cloudwatch here carries Describe*/List* but no Get*,
+#     so adding an aws_cloudwatch_dashboard would need
+#     cloudwatch:GetDashboard and would fail exactly the way
+#     ec2:GetSecurityGroupsForVpc did.
+#   * One Validate*-prefixed action is knowingly left OUT, even though
+#     AWS ships it beside ec2:GetSecurityGroupsForVpc in the
+#     caller-attachable ElasticLoadBalancingFullAccess:
+#     ec2:ValidateSecurityGroupQuotasForInterface, which pre-checks
+#     security-group quotas for a network interface. Three reasons it is
+#     not required here: AmazonEC2ReadOnlyAccess, the policy this module
+#     follows for the EC2 read surface, pairs ec2:Describe* with
+#     ec2:GetSecurityGroupsForVpc and omits it; the ELB control plane
+#     already holds it in its own right through
+#     AWSElasticLoadBalancingServiceRolePolicy, so the quota pre-check
+#     does not need the caller's credentials; and the field deployment
+#     that uncovered the gap above applied this stack's ALB successfully
+#     after adding ec2:GetSecurityGroupsForVpc alone. Grant it only if an
+#     apply is ever denied on that exact action — never pre-emptively.
 #   * AppSync and Bedrock validate broader ARNs at apply time than their
 #     documented resource formats suggest: scope to apis/* (which also
 #     covers apis/*/channelNamespace/*) and guardrail/* rather than
@@ -132,6 +176,7 @@ data "aws_iam_policy_document" "app_read" {
       "dynamodb:List*",
       "ec2:Describe*",
       "ec2:GetManagedPrefixListEntries",
+      "ec2:GetSecurityGroupsForVpc",
       "ecs:Describe*",
       "ecs:List*",
       "elasticloadbalancing:Describe*",

@@ -223,6 +223,51 @@ require_identity() {
   log "AWS identity: $who"
 }
 
+# warn_vpc_bpa — VPC Block Public Access is an account-level, per-Region
+# AWS setting that blocks VPC traffic through internet gateways. This stack
+# needs the internet gateway BOTH ways (inbound to the internet-facing ALB,
+# outbound through NAT for the Fargate tasks), so a blocking mode leaves the
+# app layer unappliable or unreachable — a failure that otherwise surfaces
+# deep inside a pipeline run with no obvious cause.
+#
+# WARNING ONLY, never fatal, in every branch: the operator may legitimately
+# lack ec2:DescribeVpcBlockPublicAccessOptions, an older AWS CLI may not
+# know the command, and the stack's VPC may already carry an exclusion that
+# makes a blocking account mode harmless. None of those should stop a
+# deploy, so this function always returns success. See README step 0e.
+#
+# Memoised: the setting is per account and per Region, so it cannot change
+# mid-run. `deploy.sh all` chains cmd_bootstrap and cmd_infra, which would
+# otherwise repeat the describe and print the same warning block twice —
+# and a repeated warning reads like a second, different problem.
+VPC_BPA_CHECKED=0
+
+warn_vpc_bpa() {
+  [[ "$VPC_BPA_CHECKED" -eq 0 ]] || return 0
+  VPC_BPA_CHECKED=1
+
+  local mode
+  mode="$(aws ec2 describe-vpc-block-public-access-options --region "$REGION" \
+    --query 'VpcBlockPublicAccessOptions.InternetGatewayBlockMode' \
+    --output text 2>/dev/null || true)"
+
+  case "$mode" in
+    block-bidirectional | block-ingress)
+      warn "VPC Block Public Access is '$mode' in $REGION, so internet gateway traffic is blocked."
+      warn "That breaks the internet-facing ALB (and, under block-bidirectional, NAT egress too)."
+      warn "Exclude the stack's VPC or set the mode to 'off' before deploying — see README step 0e."
+      ;;
+    off)
+      : # The mode this stack needs; stay quiet rather than add preflight noise.
+      ;;
+    *)
+      # Empty/None (no permission, or an AWS CLI without the command) or an
+      # unrecognised future value — report that the check was inconclusive.
+      log "could not determine the VPC Block Public Access mode for $REGION; skipping that check (see README step 0e)"
+      ;;
+  esac
+}
+
 # require_identity_context — the project/environment/region tuple that
 # names every resource. Required by every command except help.
 require_identity_context() {
@@ -497,32 +542,36 @@ b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 # stdout and is never logged.
 generate_vapid_keypair() {
   local __priv_ref="$1" __pub_ref="$2"
-  local kd pem priv_hex pub_hex priv_b64 pub_b64
+  # Locals carry a _kp_ prefix: bash scoping is dynamic, so a local named
+  # like the caller's out-variables (priv_b64/pub_b64 in cmd_vapid) would
+  # shadow them and `printf -v` would write the key into this function's
+  # copy, leaving the caller with an empty value.
+  local kd pem _kp_priv_hex _kp_pub_hex _kp_priv_b64 _kp_pub_b64
   kd="$(mktemp -d)"; chmod 700 "$kd"
   pem="$kd/vapid.pem"
   ( umask 077; openssl ecparam -name prime256v1 -genkey -noout -out "$pem" 2>/dev/null )
 
   # Public: uncompressed EC point (0x04 || X || Y), last 65 DER bytes.
-  pub_hex="$(openssl ec -in "$pem" -pubout -conv_form uncompressed -outform DER 2>/dev/null \
+  _kp_pub_hex="$(openssl ec -in "$pem" -pubout -conv_form uncompressed -outform DER 2>/dev/null \
     | tail -c 65 | xxd -p -c 200)"
   # Private: the 32-byte scalar OCTET STRING in the EC private-key DER.
-  priv_hex="$(openssl ec -in "$pem" -outform DER 2>/dev/null \
+  _kp_priv_hex="$(openssl ec -in "$pem" -outform DER 2>/dev/null \
     | openssl asn1parse -inform DER 2>/dev/null \
     | awk '/OCTET STRING/ {sub(/.*\[HEX DUMP\]:/, ""); print; exit}')"
 
   rm -rf "$kd"
 
-  if [[ "$(( ${#pub_hex} / 2 ))" -ne 65 || "${pub_hex:0:2}" != "04" ]]; then
+  if [[ "$(( ${#_kp_pub_hex} / 2 ))" -ne 65 || "${_kp_pub_hex:0:2}" != "04" ]]; then
     die "VAPID public key derivation failed (expected a 65-byte uncompressed point)"
   fi
-  if [[ "$(( ${#priv_hex} / 2 ))" -ne 32 ]]; then
+  if [[ "$(( ${#_kp_priv_hex} / 2 ))" -ne 32 ]]; then
     die "VAPID private key derivation failed (expected a 32-byte scalar)"
   fi
 
-  pub_b64="$(printf '%s' "$pub_hex" | xxd -r -p | b64url)"
-  priv_b64="$(printf '%s' "$priv_hex" | xxd -r -p | b64url)"
-  printf -v "$__priv_ref" '%s' "$priv_b64"
-  printf -v "$__pub_ref"  '%s' "$pub_b64"
+  _kp_pub_b64="$(printf '%s' "$_kp_pub_hex" | xxd -r -p | b64url)"
+  _kp_priv_b64="$(printf '%s' "$_kp_priv_hex" | xxd -r -p | b64url)"
+  printf -v "$__priv_ref" '%s' "$_kp_priv_b64"
+  printf -v "$__pub_ref"  '%s' "$_kp_pub_b64"
 }
 
 cmd_vapid() {
@@ -586,6 +635,7 @@ cmd_bootstrap() {
   require_tools terraform aws jq
   require_identity_context
   require_identity
+  warn_vpc_bpa
   ensure_bootstrap_init
 
   # Assemble the bootstrap variables. --with-vapid drives the
@@ -630,6 +680,7 @@ cmd_infra() {
   require_tools terraform aws jq
   require_identity_context
   require_identity
+  warn_vpc_bpa
   warn "the app-layer tfvars must be committed at infrastructure/app/envs/$ENVIRONMENT.tfvars"
   warn "(the archive is HEAD-only in a git tree — commit it before running this)"
   drive_pipeline iac
