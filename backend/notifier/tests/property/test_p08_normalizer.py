@@ -3,8 +3,8 @@
 
 **Validates: Requirements 5.5, 5.6**
 
-For any incident event from any of the three source shapes (CloudWatch
-Alarm, Incident Manager, DevOps Agent finding) with arbitrary field
+For any incident event from either source shape (CloudWatch Alarm,
+DevOps Agent finding) with arbitrary field
 content, the normalizer produces an Incident_Notification containing a
 non-empty summary, a severity from the allowed set, a valid ISO-8601
 timestamp, and an executionId if and only if the source event provided
@@ -21,8 +21,7 @@ arbitrary-event checks, the payload contract of
 passthrough), determinism, and the timestamp echo/fallback rule are each
 asserted, and one focused case per source shape pins the documented
 severity heuristics: the CloudWatch description token scan with
-most-severe-wins precedence, the Incident Manager integer impact
-mapping, and the DevOps Agent case/whitespace severity normalization.
+most-severe-wins precedence and the DevOps Agent case/whitespace severity normalization.
 
 The executionId oracle re-derives the documented uniform extraction rule
 (``detail.executionId`` first, then ``detail.execution.id``, non-empty
@@ -54,9 +53,6 @@ _SEVERITY_ORDER: Final = ("critical", "high", "medium", "low")
 _NOISE_WORDS: Final = ("alarm", "cpu", "latency", "disk", "requests", "threshold")
 """Description filler words that contain no severity token."""
 
-_IMPACT_SEVERITIES: Final = {1: "critical", 2: "high", 3: "medium", 4: "low", 5: "low"}
-"""Documented Incident Manager impact-to-severity mapping."""
-
 _json_scalars: Final = st.one_of(
     st.none(),
     st.booleans(),
@@ -77,12 +73,12 @@ _json_values: Final = st.recursive(
 """Arbitrary JSON-like values: scalars, lists, and mappings, bounded depth."""
 
 _source_values: Final = st.one_of(
-    st.sampled_from(("aws.cloudwatch", "aws.ssm-incidents", "aws.aidevops")),
+    st.sampled_from(("aws.cloudwatch", "aws.aidevops")),
     st.text(max_size=16),
     st.none(),
     st.integers(),
 )
-"""Top-level ``source`` values: the three real ones plus arbitrary junk."""
+"""Top-level ``source`` values: the two real ones plus arbitrary junk."""
 
 _time_values: Final = st.one_of(
     st.datetimes().map(lambda moment: moment.isoformat()),
@@ -116,8 +112,8 @@ def _seeded_details(draw: st.DrawFn) -> dict[str, object]:
     """Draw a ``detail`` mapping seeded with the recognized field names.
 
     Starts from an arbitrary mapping and independently overlays each field
-    the normalizer reads — ``executionId``, ``execution``, the CloudWatch,
-    Incident Manager, and DevOps Agent fields — with content that is
+    the normalizer reads — ``executionId``, ``execution``, the CloudWatch
+    and DevOps Agent fields — with content that is
     sometimes well-typed and sometimes arbitrary junk.
 
     Args:
@@ -162,10 +158,6 @@ def _seeded_details(draw: st.DrawFn) -> dict[str, object]:
             st.sampled_from(("critical", " HIGH ", "Medium", "sev2")),
         )
         detail["severity"] = draw(severity)
-    if draw(st.booleans()):
-        detail["impact"] = draw(
-            st.one_of(_json_scalars, st.integers(-1, 6), st.booleans())
-        )
     return detail
 
 
@@ -175,7 +167,7 @@ def _events(draw: st.DrawFn) -> dict[str, object]:
 
     Arbitrary extra keys are always present; ``source``, ``time``, and
     ``detail`` are each independently absent, well-formed, or malformed,
-    covering all three source shapes plus the catch-all.
+    covering both source shapes plus the catch-all.
 
     Args:
         draw: Hypothesis draw function supplied by ``st.composite``.
@@ -296,8 +288,6 @@ def test_normalize_is_total_and_payload_well_formed(event: dict[str, object]) ->
     raw_source = event.get("source")
     if raw_source == "aws.cloudwatch":
         assert result.source == "cloudwatch-alarm"
-    elif raw_source == "aws.ssm-incidents":
-        assert result.source == "incident-manager"
     else:
         assert result.source == "devops-agent-finding"
 
@@ -524,46 +514,6 @@ def test_cloudwatch_severity_token_precedence(
     event, expected_severity, expected_summary = case
     result = normalize(event, notification_id=_NOTIFICATION_ID, now_iso=_NOW_ISO)
     assert result.source == "cloudwatch-alarm"
-    assert result.severity == expected_severity
-    assert result.summary == expected_summary
-
-
-@st.composite
-def _incident_manager_cases(draw: st.DrawFn) -> tuple[dict[str, object], str, str]:
-    """Draw a realistic Incident Manager event with its expected outcome.
-
-    Args:
-        draw: Hypothesis draw function supplied by ``st.composite``.
-
-    Returns:
-        Triple of the event, the expected severity mapped from the
-        integer impact, and the expected summary (the incident title).
-    """
-    impact = draw(st.sampled_from(tuple(_IMPACT_SEVERITIES)))
-    title = draw(_labels)
-    event: dict[str, object] = {
-        "source": "aws.ssm-incidents",
-        "detail": {"title": title, "impact": impact},
-    }
-    return event, _IMPACT_SEVERITIES[impact], title
-
-
-@given(case=_incident_manager_cases())
-@settings(max_examples=100, deadline=None)
-def test_incident_manager_impact_mapping(
-    case: tuple[dict[str, object], str, str],
-) -> None:
-    """Incident Manager impact 1..5 maps to critical/high/medium/low/low.
-
-    The notification severity follows the documented integer mapping and
-    the summary preserves the incident title (Req 5.5).
-
-    Args:
-        case: Triple of event, expected severity, and expected summary.
-    """
-    event, expected_severity, expected_summary = case
-    result = normalize(event, notification_id=_NOTIFICATION_ID, now_iso=_NOW_ISO)
-    assert result.source == "incident-manager"
     assert result.severity == expected_severity
     assert result.summary == expected_summary
 

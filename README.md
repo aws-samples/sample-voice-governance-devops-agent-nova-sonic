@@ -2,7 +2,7 @@
 
 A voice-driven AWS support portal for DevOps engineers. An engineer speaks into the browser; Amazon Nova 2 Sonic (Bedrock speech-to-speech, us-east-1) transcribes and converses over a bidirectional stream, forwarding diagnostic questions as text to the AWS DevOps Agent through a Nova Sonic tool named `ask_devops_agent`. Every tool call is gated **fail-closed** (any error counts as a block) by a deterministic mutation-verb check followed by an Amazon Bedrock Guardrail with a denied topic and content filters: only requests classified as read/diagnostic operations ever reach the agent. The agent then reads the account through a read-only IAM role that you associate with the Agent Space. The agent's streamed answer is spoken back to the engineer.
 
-The portal also pushes incident notifications: EventBridge events (CloudWatch Alarms, Incident Manager, DevOps Agent findings) drive a Notifier Lambda that fans out to an AppSync Events channel (in-app popup + chime) and to Web Push subscriptions (browser closed), with optional SNS escalation. Voice sessions survive Bedrock's 8-minute stream cap through session segmentation with context replay, and survive disconnects through reconnect with transcript restore from DynamoDB.
+The portal also pushes incident notifications: EventBridge events (CloudWatch Alarms, DevOps Agent findings) drive a Notifier Lambda that fans out to an AppSync Events channel (in-app popup + chime) and to Web Push subscriptions (browser closed), with optional SNS escalation. Voice sessions survive Bedrock's 8-minute stream cap through session segmentation with context replay, and survive disconnects through reconnect with transcript restore from DynamoDB.
 
 
 # Contributors
@@ -73,7 +73,7 @@ graph TB
 | Session store | DynamoDB: `{env}-voice-sessions` (GSI `by-engineer`), `{env}-agent-chats`, `{env}-push-subscriptions`, `{env}-transcripts` | Session state, chat mappings, push subscriptions, transcripts; TTL + SSE + PITR |
 | In-app notifications | AppSync Events API (channel `/incidents/all`) | Cognito-authorized realtime subscription; IAM publish from the Notifier |
 | Notifier | Lambda (Python 3.14, async) | Normalizes EventBridge events, fans out to AppSync + Web Push + optional SNS |
-| Event sources | EventBridge rules | CloudWatch Alarms, Incident Manager, DevOps Agent findings |
+| Event sources | EventBridge rules | CloudWatch Alarms, DevOps Agent findings |
 | Auth | Cognito user pool + hosted UI | OAuth 2.0 code + PKCE; JWT validated at the WebSocket handshake and on AppSync connects |
 | Observability | 4 CloudWatch alarms + ops SNS topic | Task count, unhealthy targets, voice 5XX rate, Notifier errors |
 

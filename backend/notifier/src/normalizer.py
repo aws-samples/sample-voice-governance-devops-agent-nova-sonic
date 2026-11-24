@@ -1,7 +1,7 @@
 """Pure event normalizer for the Notifier Lambda (Req 5.5, 5.6).
 
-Maps the three EventBridge incident event shapes — CloudWatch Alarm state
-changes, Incident Manager incidents, and DevOps Agent findings — onto the
+Maps the two EventBridge incident event shapes — CloudWatch Alarm state
+changes and DevOps Agent findings — onto the
 design's Incident_Notification payload, the single schema published to
 AppSync Events, Web Push, and SNS.
 
@@ -15,10 +15,9 @@ the current time are injected by the caller, and the module performs no I/O
 Source classification (by the top-level ``source`` field):
 
 * ``"aws.cloudwatch"`` maps to ``cloudwatch-alarm``.
-* ``"aws.ssm-incidents"`` maps to ``incident-manager``.
 * Anything else — including ``"aws.aidevops"`` and a missing or non-string
   ``source`` — maps to ``devops-agent-finding``. The catch-all keeps
-  normalization total: the Lambda is subscribed to exactly three EventBridge
+  normalization total: the Lambda is subscribed to exactly two EventBridge
   rule patterns, so an unrecognized shape degrades to the finding mapping
   instead of failing.
 
@@ -31,10 +30,6 @@ Per-source field mappings and severity heuristics:
   (``critical`` over ``high`` over ``medium`` over ``low``); with no token,
   ``detail.state.value`` equal to ``"ALARM"`` (case-insensitive) yields
   ``high`` and any other state yields ``medium``.
-* Incident Manager: ``summary`` comes from ``detail.title``; ``severity``
-  maps the integer ``detail.impact``: 1 to ``critical``, 2 to ``high``, 3 to
-  ``medium``, 4 or more to ``low``, and any other value (non-integer,
-  boolean, or below 1) to ``medium``.
 * DevOps Agent finding: ``summary`` comes from ``detail.summary`` with
   ``detail.title`` as fallback; ``severity`` is ``detail.severity`` stripped
   and lowercased when that yields an allowed value, else ``medium``.
@@ -61,8 +56,8 @@ from typing import Literal
 
 __all__ = ["IncidentNotification", "Severity", "Source", "normalize"]
 
-type Source = Literal["cloudwatch-alarm", "incident-manager", "devops-agent-finding"]
-"""Portal source label distinguishing the three EventBridge event shapes."""
+type Source = Literal["cloudwatch-alarm", "devops-agent-finding"]
+"""Portal source label distinguishing the two EventBridge event shapes."""
 
 type Severity = Literal["critical", "high", "medium", "low"]
 """Allowed Incident_Notification severity values (Req 5.5)."""
@@ -72,7 +67,6 @@ _SEVERITIES: tuple[Severity, ...] = ("critical", "high", "medium", "low")
 
 _SOURCE_LABELS: Mapping[Source, str] = {
     "cloudwatch-alarm": "CloudWatch alarm",
-    "incident-manager": "Incident Manager",
     "devops-agent-finding": "DevOps Agent",
 }
 """Human-readable source names used in fallback summaries."""
@@ -170,9 +164,6 @@ def normalize(
     if source == "cloudwatch-alarm":
         summary = _cloudwatch_summary(detail)
         severity = _cloudwatch_severity(detail)
-    elif source == "incident-manager":
-        summary = _incident_manager_summary(detail)
-        severity = _incident_manager_severity(detail)
     else:
         summary = _devops_summary(detail)
         severity = _devops_severity(detail)
@@ -198,14 +189,11 @@ def _classify(source: object) -> Source:
         source: The raw top-level ``source`` value from the event.
 
     Returns:
-        ``cloudwatch-alarm`` for ``"aws.cloudwatch"``, ``incident-manager``
-        for ``"aws.ssm-incidents"``, and ``devops-agent-finding`` for
-        everything else (the documented catch-all).
+        ``cloudwatch-alarm`` for ``"aws.cloudwatch"`` and
+        ``devops-agent-finding`` for everything else (the documented catch-all).
     """
     if source == "aws.cloudwatch":
         return "cloudwatch-alarm"
-    if source == "aws.ssm-incidents":
-        return "incident-manager"
     return "devops-agent-finding"
 
 
@@ -261,45 +249,6 @@ def _cloudwatch_severity(detail: Mapping[str, object] | None) -> Severity:
     return "medium"
 
 
-def _incident_manager_summary(detail: Mapping[str, object] | None) -> str | None:
-    """Extract the Incident Manager summary from the incident title.
-
-    Args:
-        detail: The event's ``detail`` mapping, or ``None``.
-
-    Returns:
-        The non-blank ``title`` text, or ``None`` when absent.
-    """
-    if detail is None:
-        return None
-    return _text(detail.get("title"))
-
-
-def _incident_manager_severity(detail: Mapping[str, object] | None) -> Severity:
-    """Map the Incident Manager integer impact onto a severity.
-
-    Mapping: impact 1 is ``critical``, 2 is ``high``, 3 is ``medium``, and
-    4 or more is ``low``. Any other value — non-integer, boolean, or below
-    1 — degrades to ``medium``.
-
-    Args:
-        detail: The event's ``detail`` mapping, or ``None``.
-
-    Returns:
-        The mapped severity, or the ``medium`` fallback.
-    """
-    impact = detail.get("impact") if detail is not None else None
-    if not isinstance(impact, int) or isinstance(impact, bool):
-        return "medium"
-    if impact == 1:
-        return "critical"
-    if impact == 2:
-        return "high"
-    if impact >= 4:
-        return "low"
-    return "medium"
-
-
 def _devops_summary(detail: Mapping[str, object] | None) -> str | None:
     """Extract the DevOps Agent finding summary.
 
@@ -340,7 +289,7 @@ def _execution_id(detail: Mapping[str, object] | None) -> str | None:
 
     Checks ``detail.executionId`` first, then ``detail.execution.id``. Only
     a non-empty string counts as provided; any other value is treated as
-    absent. The same extraction applies to all three source shapes, so the
+    absent. The same extraction applies to both source shapes, so the
     payload carries an ``executionId`` exactly when the event provided one.
 
     Args:

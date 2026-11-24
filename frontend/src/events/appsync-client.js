@@ -50,8 +50,8 @@ import { getIdToken, isAuthenticated } from '../auth/cognito.js';
  * Payload Schema).
  * @typedef {object} IncidentNotification
  * @property {string} notificationId - Unique notification identifier.
- * @property {string} source - Originating source: `cloudwatch-alarm`,
- *   `incident-manager`, or `devops-agent-finding`.
+ * @property {string} source - Originating source: `cloudwatch-alarm` or
+ *   `devops-agent-finding`.
  * @property {string} summary - Human-readable incident summary.
  * @property {string} severity - `critical`, `high`, `medium`, or `low`.
  * @property {string} timestamp - ISO-8601 UTC timestamp.

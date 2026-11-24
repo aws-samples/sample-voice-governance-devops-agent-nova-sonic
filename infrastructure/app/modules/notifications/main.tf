@@ -1,7 +1,6 @@
 # Notifications module (Req 5.1, 5.11, 15.4): the notification plane's
-# ingest and fan-out entry point — three EventBridge rules on the default
-# bus (CloudWatch Alarm state changes, Incident Manager incidents, DevOps
-# Agent findings) targeting the Notifier Lambda, the function itself with
+# ingest and fan-out entry point — two EventBridge rules on the default
+# bus (CloudWatch Alarm state changes, DevOps Agent findings) targeting the Notifier Lambda, the function itself with
 # its scoped IAM role and explicit log group, and the optional SNS
 # escalation topic. Environment variable names mirror the handler's
 # required-key manifest (backend/notifier/src/handler.py) exactly;
@@ -248,7 +247,7 @@ resource "aws_lambda_function" "notifier" {
 }
 
 # ---------------------------------------------------------------------------
-# EventBridge rules on the default bus (Req 5.1): the three incident
+# EventBridge rules on the default bus (Req 5.1): the two incident
 # sources, each with a Lambda target and an invoke permission scoped to
 # that one rule.
 # ---------------------------------------------------------------------------
@@ -285,45 +284,7 @@ resource "aws_lambda_permission" "cloudwatch_alarms" {
   source_arn    = aws_cloudwatch_event_rule.cloudwatch_alarms.arn
 }
 
-# (2) Incident Manager incidents: per the EventBridge service reference
-# (events-ref-ssm-incidents), Incident Manager delivers its events to
-# EventBridge via AWS CloudTrail, so the documented pattern is detail-type
-# "AWS API Call via CloudTrail" narrowed by detail.eventSource. The
-# eventName narrows further to StartIncident — the API call that opens
-# every incident (manual, CloudWatch-alarm, or EventBridge-created) — so
-# the Notifier fires once per new incident rather than on every Incident
-# Manager write. The normalizer classifies by top-level source
-# ("aws.ssm-incidents" → incident-manager) and degrades missing fields
-# safely, so the CloudTrail detail shape is handled (Req 5.5).
-resource "aws_cloudwatch_event_rule" "incident_manager" {
-  name        = "${var.environment}-notify-incident-manager"
-  description = "Routes Incident Manager incident-opening events (via CloudTrail) to the Notifier (Req 5.1)"
-
-  event_pattern = jsonencode({
-    source        = ["aws.ssm-incidents"]
-    "detail-type" = ["AWS API Call via CloudTrail"]
-    detail = {
-      eventSource = ["ssm-incidents.amazonaws.com"]
-      eventName   = ["StartIncident"]
-    }
-  })
-}
-
-resource "aws_cloudwatch_event_target" "incident_manager" {
-  rule      = aws_cloudwatch_event_rule.incident_manager.name
-  target_id = "notifier-lambda"
-  arn       = aws_lambda_function.notifier.arn
-}
-
-resource "aws_lambda_permission" "incident_manager" {
-  statement_id  = "AllowEventBridgeIncidentManager"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.notifier.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.incident_manager.arn
-}
-
-# (3) DevOps Agent findings: the finding event source is defined by the
+# (2) DevOps Agent findings: the finding event source is defined by the
 # DevOps Agent service and carries no publicly documented detail-type, so
 # the rule matches on source alone and the source string is configurable
 # (var.devops_agent_event_source, default "aws.aidevops" — the service's
