@@ -71,7 +71,12 @@ def main() -> int:
         session = boto3.Session(profile_name=args.profile, region_name=args.region)
         client = session.client("bedrock-runtime")
 
-    rows = list(csv.DictReader((HERE / "prompts.csv").open(encoding="utf-8")))
+    with (HERE / "prompts.csv").open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        # Stop before results.csv is opened for writing, so an empty or
+        # header-only prompts.csv never truncates the published results.
+        raise SystemExit("prompts.csv has no prompt rows; nothing to evaluate")
     results = []
     for row in rows:
         lexical = "BLOCK" if has_mutation_intent(row["prompt"]) else "PASS"
