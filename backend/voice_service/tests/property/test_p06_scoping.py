@@ -34,6 +34,7 @@ from typing import Final
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from app.domain.mutation_guard import has_mutation_intent
 from app.orchestration.tool_router import ToolRouter
 from tests.fakes import FakeClock, FakeDevOpsAgent, FakeGuardrail, FakeSessionStore
 
@@ -97,7 +98,12 @@ async def _check_scoping(
 
 @given(
     execution_id=_EXECUTION_IDS,
-    query=st.text(min_size=1).filter(str.strip),
+    # Read-style queries only: the router's lexical gate correctly blocks
+    # a query that leads with a mutation verb (for example "ENABLE"), and
+    # this property is about chat scoping, not the gate.
+    query=st.text(min_size=1)
+    .filter(str.strip)
+    .filter(lambda q: not has_mutation_intent(q)),
     session_id=st.text(min_size=1),
     engineer_id=st.text(min_size=1),
 )
