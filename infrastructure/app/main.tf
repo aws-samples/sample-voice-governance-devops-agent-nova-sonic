@@ -236,9 +236,9 @@ module "bedrock_guardrail" {
 # The role the DevOps Agent assumes to inspect this account (Req 3.2): its
 # own service-linked role carries no read access, so without this — and the
 # out-of-band AssociateService call that registers it — every diagnostic
-# question returns an empty answer. Read-only by construction: managed
-# ReadOnlyAccess minus an explicit Deny on data-plane and secret reads, and
-# no elevated role is ever registered (module header).
+# question returns an empty answer. Read-only by construction: the managed
+# AIDevOpsAgentAccessPolicy plus an explicit Deny on data-plane and secret
+# reads, and no elevated role is ever registered (module header).
 module "devops_agent_access" {
   source = "./modules/devops_agent_access"
 
