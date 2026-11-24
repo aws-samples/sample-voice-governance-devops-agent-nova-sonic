@@ -18,12 +18,21 @@
 # (the AWS provider has no devops-agent resources), so it remains an
 # operator step; `devops_agent_assumable_role_arn` is exported for it.
 #
-# PERMISSION MODEL. AWS managed ReadOnlyAccess supplies the broad
-# describe/list/get surface a diagnostic assistant needs across every
-# service, and an explicit Deny then removes the data-plane reads that
-# would let the agent read customer or portal *content* rather than
-# configuration. Explicit Deny always wins over the managed policy's
-# Allow, so the boundary holds no matter how ReadOnlyAccess evolves.
+# PERMISSION MODEL. The AWS managed AIDevOpsAgentAccessPolicy is the
+# documented role policy for AWS DevOps Agent and the only permission set
+# AWS has tested with the agent. The agent also applies a permission
+# guardrail (a session policy) at assume-role time, so its effective
+# permissions are the intersection of this role and that guardrail.
+# On top of the managed policy:
+#   * a small inline Allow adds two IAM key-age reads the managed policy
+#     omits (both are inside the guardrail, which permits ReadOnlyAccess);
+#   * an explicit Deny removes data-plane and secret reads, plus
+#     support:CreateCase, the one write the managed policy grants that a
+#     read-only portal does not need. The managed policy does not grant
+#     the data-plane reads today; the Deny keeps that true if AWS widens
+#     it, because an explicit Deny always wins.
+# AWS DevOps Agent IAM docs:
+# https://docs.aws.amazon.com/devopsagent/latest/userguide/aws-devops-agent-security-limiting-agent-access-in-an-aws-account.html
 #
 # NOTE ON MUTATION. `agentElevatedRoleArn` — the optional second role the
 # service assumes for state-changing "directed actions" — is deliberately
@@ -44,15 +53,18 @@ terraform {
 
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
+data "aws_region" "current" {}
 
 locals {
   role_name = "${var.environment}-devops-agent-readonly"
 }
 
 # Trust policy: only the DevOps Agent service may assume the role, and only
-# on behalf of this account (aws:SourceAccount defeats the cross-account
-# confused-deputy case, where another customer's agent space names this
-# role ARN in its own association).
+# for an agent space in this account and Region. aws:SourceAccount and
+# aws:SourceArn together defeat the confused-deputy case, where another
+# customer's agent space names this role ARN in its own association. The
+# ArnLike agentspace/* form follows the AWS DevOps Agent troubleshooting
+# guidance for custom roles.
 data "aws_iam_policy_document" "assume_role" {
   statement {
     sid     = "DevOpsAgentAssumeRole"
@@ -69,21 +81,47 @@ data "aws_iam_policy_document" "assume_role" {
       variable = "aws:SourceAccount"
       values   = [data.aws_caller_identity.current.account_id]
     }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${data.aws_partition.current.partition}:aidevops:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:agentspace/*"]
+    }
   }
 }
 
 resource "aws_iam_role" "agent" {
   name               = local.role_name
-  description        = "Read-only role the AWS DevOps Agent assumes to inspect this account for the ${var.environment} support portal; data-plane reads are explicitly denied."
+  description        = "Read-only role the AWS DevOps Agent assumes to inspect this account for the ${var.environment} support portal; AIDevOpsAgentAccessPolicy with data-plane and secret reads explicitly denied."
   assume_role_policy = data.aws_iam_policy_document.assume_role.json
 }
 
-# The broad read surface: every Describe/List/Get the agent needs to reason
-# about configuration, across services the portal cannot enumerate ahead of
-# time (an incident can involve anything).
-resource "aws_iam_role_policy_attachment" "read_only" {
+# The read surface: the AWS managed policy built for this agent, maintained
+# by AWS as the agent gains capabilities.
+resource "aws_iam_role_policy_attachment" "agent_access" {
   role       = aws_iam_role.agent.name
-  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/ReadOnlyAccess"
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AIDevOpsAgentAccessPolicy"
+}
+
+# Reads the managed policy omits but the portal's documented questions need
+# ("which IAM users have access keys older than 90 days?"). Both actions are
+# in ReadOnlyAccess, so the agent's permission guardrail allows them.
+data "aws_iam_policy_document" "extra_reads" {
+  statement {
+    sid    = "AllowAccessKeyAgeReads"
+    effect = "Allow"
+    actions = [
+      "iam:GetAccessKeyLastUsed",
+      "iam:ListAccessKeys",
+    ]
+    resources = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:user/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "extra_reads" {
+  name   = "${local.role_name}-extra-reads"
+  role   = aws_iam_role.agent.id
+  policy = data.aws_iam_policy_document.extra_reads.json
 }
 
 # The subtraction: configuration is fair game, stored CONTENT is not.
@@ -111,11 +149,10 @@ data "aws_iam_policy_document" "deny_data_plane" {
     resources = ["*"]
   }
 
-  # Secret material. ReadOnlyAccess grants ssm:Get*, which would return
-  # SecureString *values* — including this portal's own origin-verify
-  # secret and the Notifier's VAPID private key. Denying the parameter and
-  # secret value APIs, plus kms:Decrypt as the backstop for any other
-  # path to plaintext, keeps the agent's view to configuration only.
+  # Secret material: SecureString values (including this portal's own
+  # origin-verify secret and the Notifier's VAPID private key) and secret
+  # values. kms:Decrypt is the backstop for any other path to plaintext;
+  # the guardrail allows it as an opt-in, so it is denied here outright.
   statement {
     sid    = "DenySecretMaterialReads"
     effect = "Deny"
@@ -127,6 +164,16 @@ data "aws_iam_policy_document" "deny_data_plane" {
       "ssm:GetParameters",
       "ssm:GetParametersByPath",
     ]
+    resources = ["*"]
+  }
+
+  # The one write in AIDevOpsAgentAccessPolicy that a read-only portal does
+  # not need. cloudtrail:StartQuery stays allowed: it runs a CloudTrail Lake
+  # query, changes no resource, and the agent uses it to investigate.
+  statement {
+    sid       = "DenySupportCaseCreation"
+    effect    = "Deny"
+    actions   = ["support:CreateCase"]
     resources = ["*"]
   }
 }

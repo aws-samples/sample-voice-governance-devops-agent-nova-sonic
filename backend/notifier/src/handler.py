@@ -168,10 +168,9 @@ def _is_contentless_agent_event(notification: IncidentNotification) -> bool:
     question.
 
     Dropping is scoped to the agent source on purpose. A CloudWatch alarm
-    or Incident Manager event reaches this Lambda only by matching a
-    narrow rule pattern (alarm transition into ALARM; ``StartIncident``),
-    so even without a title it reports a real incident and must still be
-    delivered.
+    event reaches this Lambda only by matching a narrow rule pattern (a
+    transition into ALARM), so even without a title it reports a real
+    incident and must still be delivered.
 
     Args:
         notification: The normalized notification for the current event.
@@ -721,9 +720,8 @@ def handler(event: dict[str, object], context: object) -> dict[str, object]:
     with a response dict.
 
     Args:
-        event: The EventBridge event, matched by one of the three incident
-            rule patterns (CloudWatch Alarm, Incident Manager, DevOps
-            Agent finding).
+        event: The EventBridge event, matched by one of the two incident
+            rule patterns (CloudWatch Alarm, DevOps Agent finding).
         context: The Lambda context object; unused, present to satisfy the
             handler signature.
 

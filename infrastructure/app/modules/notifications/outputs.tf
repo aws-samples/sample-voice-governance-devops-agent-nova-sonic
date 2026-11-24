@@ -9,10 +9,9 @@ output "lambda_function_arn" {
 }
 
 output "event_rule_arns" {
-  description = "ARNs of the three incident EventBridge rules on the default bus, keyed by source (cloudwatch_alarms, incident_manager, devops_agent_findings) (Req 5.1)."
+  description = "ARNs of the two incident EventBridge rules on the default bus, keyed by source (cloudwatch_alarms, devops_agent_findings) (Req 5.1)."
   value = {
     cloudwatch_alarms     = aws_cloudwatch_event_rule.cloudwatch_alarms.arn
-    incident_manager      = aws_cloudwatch_event_rule.incident_manager.arn
     devops_agent_findings = aws_cloudwatch_event_rule.devops_agent_findings.arn
   }
 }
