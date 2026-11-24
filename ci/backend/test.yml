@@ -13,7 +13,7 @@
 #   pytest                (unit + hypothesis property suites, no AWS access)
 #
 # Tool versions come from each package's [dev] extra (ruff~=0.14.0,
-# mypy~=1.18, interrogate~=1.7, import-linter~=2.1, pytest~=8.3.4,
+# mypy~=1.18, interrogate~=1.7, import-linter~=2.1, pytest~=9.2.0,
 # hypothesis~=6.122) so CI and local runs stay pinned identically.
 #
 # Python 3.14 is not pre-installed on aws/codebuild/standard:7.0; the
